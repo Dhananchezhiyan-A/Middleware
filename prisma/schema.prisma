@@ -1,0 +1,850 @@
+// =============================================================================
+// Lead Integration & Distribution Middleware — Prisma Schema
+// =============================================================================
+// DATA SAFETY RULES:
+//   - Single application identity: models carry no `tenantId` — every row in
+//     the database belongs to the one application.
+//   - Immutable records (raw payloads, stage events, scores, attempts, audit)
+//     have NO @updatedAt — they are append-only.
+//   - Unique constraints enforce idempotency (webhook events, external lead
+//     ids, delivery identity) at the DATABASE level, not just in application
+//     code.
+//   - Secrets are stored ONLY as AES-256-GCM ciphertext in
+//     IntegrationCredential — never in plain columns, never in audit logs.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../packages/database/src/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  DISABLED
+}
+
+enum ApiKeyStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum LeadStatus {
+  RECEIVED
+  PROCESSING
+  PROCESSED
+  REJECTED
+  FAILED
+}
+
+enum LeadStage {
+  RECEIVED
+  VALIDATION
+  NORMALIZATION
+  DEDUPLICATION
+  ENRICHMENT
+  SCORING
+  ROUTING
+  MAPPING
+  QUEUED
+  DELIVERY
+  COMPLETED
+  FAILED
+}
+
+enum StageStatus {
+  PENDING
+  RUNNING
+  PASSED
+  FAILED
+  SKIPPED
+}
+
+enum ValidationStatus {
+  PENDING
+  PASSED
+  FAILED
+}
+
+enum DeduplicationStatus {
+  PENDING
+  UNIQUE
+  DUPLICATE
+  DISABLED
+}
+
+enum WebhookEventStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
+  DUPLICATE
+}
+
+enum SourceType {
+  GOOGLE_ADS
+  META_ADS
+  WEBSITE
+  LINKEDIN
+  API
+  WEBHOOK
+  CSV
+  CUSTOM
+}
+
+enum DestinationType {
+  SALESFORCE
+  ZOHO
+  DCT_CRM
+  HUBSPOT
+  PIPEDRIVE
+  CUSTOM_API
+  WEBHOOK
+}
+
+enum DestinationStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum ConnectionStatus {
+  NOT_CONFIGURED
+  CONNECTED
+  DISCONNECTED
+  ERROR
+}
+
+enum DeliveryStatus {
+  PENDING
+  QUEUED
+  IN_PROGRESS
+  SUCCEEDED
+  FAILED
+  DEAD
+  SKIPPED
+}
+
+enum DeliveryAttemptStatus {
+  SUCCEEDED
+  FAILED
+  TIMEOUT
+  RATE_LIMITED
+  NOT_CONFIGURED
+  REJECTED
+}
+
+enum CredentialType {
+  WEBHOOK_HMAC
+  API_KEY
+  BASIC
+  OAUTH
+  BEARER
+}
+
+enum ImportJobStatus {
+  PENDING
+  PARSING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum AuditActorType {
+  USER
+  API_KEY
+  SYSTEM
+  WORKER
+}
+
+enum RuleOperator {
+  EQ
+  NEQ
+  CONTAINS
+  NOT_CONTAINS
+  STARTS_WITH
+  ENDS_WITH
+  GT
+  GTE
+  LT
+  LTE
+  IN
+  NOT_IN
+  EXISTS
+  NOT_EXISTS
+}
+
+enum MatchedField {
+  EXTERNAL_ID
+  PHONE
+  EMAIL
+  PHONE_EMAIL
+  CUSTOM
+}
+
+enum FieldMappingStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+// =============================================================================
+// SINGLE APPLICATION IDENTITY
+// =============================================================================
+
+model Tenant {
+  id        String       @id @default(cuid())
+  name      String
+  slug      String       @unique
+  status    TenantStatus @default(ACTIVE)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  @@index([status])
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String
+  passwordHash String
+  name         String
+  status       UserStatus @default(ACTIVE)
+  lastLoginAt  DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  roleId    String
+  role      Role        @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  sessions  UserSession[]
+  apiKeys   ApiKey[]
+  auditLogs AuditLog[]
+
+  @@unique([email])
+  @@index([status])
+  @@index([roleId])
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  // Permission codes from the static catalog in @middleware/types.
+  isSystem    Boolean  @default(false)
+  permissions String[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users  User[]
+
+  @@unique([name])
+}
+
+model UserSession {
+  id               String    @id @default(cuid())
+  userId           String
+  // SHA-256 of the refresh token — the raw token is never stored.
+  refreshTokenHash String    @unique
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  ip               String?
+  userAgent        String?
+  createdAt        DateTime  @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model ApiKey {
+  id          String       @id @default(cuid())
+  userId      String
+  name        String
+  // Displayable prefix (e.g. "mw_live_ab12…") for identification in UI/logs.
+  keyPrefix   String
+  // SHA-256 hash of the full key — the raw key is returned ONCE at creation.
+  keyHash     String       @unique
+  status      ApiKeyStatus @default(ACTIVE)
+  scopes      String[]
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime     @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+// =============================================================================
+// LEAD SOURCES & INBOUND
+// =============================================================================
+
+model LeadSource {
+  id        String     @id @default(cuid())
+  type      SourceType
+  // Machine code unique within this application.
+  code      String
+  name      String
+  // Non-secret display/config data (never credentials).
+  config    Json       @default("{}")
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  accounts        LeadSourceAccount[]
+  leads           Lead[]
+  webhookEvents   WebhookEvent[]
+  importJobs      ImportJob[]
+
+  @@unique([code])
+  @@index([type])
+}
+
+model LeadSourceAccount {
+  id        String   @id @default(cuid())
+  sourceId  String
+  name      String
+  // Public identifier embedded in webhook URLs (/webhooks/inbound/:publicId).
+  publicId  String   @unique
+  // Non-secret account metadata (ad account id, form id, …).
+  config    Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  source        LeadSource            @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  credentials   IntegrationCredential[]
+  leads         Lead[]
+  webhookEvents WebhookEvent[]
+  importJobs    ImportJob[]
+
+  @@index([sourceId])
+}
+
+// Encrypted secrets. `secret` is AES-256-GCM ciphertext produced by
+// @middleware/shared crypto helpers. NEVER returned by any API.
+model IntegrationCredential {
+  id         String         @id @default(cuid())
+  type       CredentialType
+  // Which entity this credential belongs to (exactly one is set).
+  sourceAccountId String?
+  destinationId   String?
+  // AES-256-GCM ciphertext (base64: iv.tag.data)
+  secret     String
+  // Non-secret metadata: key id, token endpoint, prefix, lastRotation…
+  meta       Json           @default("{}")
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+  rotatedAt  DateTime?
+
+  sourceAccount   LeadSourceAccount?    @relation(fields: [sourceAccountId], references: [id], onDelete: Cascade)
+  destination     Destination?          @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+
+  @@index([sourceAccountId])
+  @@index([destinationId])
+}
+
+// =============================================================================
+// LEADS
+// =============================================================================
+
+model Lead {
+  id              String     @id @default(cuid())
+  leadId          String     @unique @default(dbgenerated())
+  sourceId        String
+  sourceAccountId String
+  // Provider-side identifier. Together with account it forms the
+  // idempotency key: re-sent leads can never create a second row.
+  externalLeadId  String?
+  status          LeadStatus @default(RECEIVED)
+  stage           LeadStage  @default(RECEIVED)
+
+  // Canonical (normalized) lead data — the single source of truth downstream.
+  canonicalData   Json       @default("{}")
+  // Provider-specific normalized view (pre-canonical mapping).
+  normalizedData  Json?
+
+  // Dedup matching helpers (hashed values; never raw PII in index columns).
+  dedupPhoneHash  String?
+  dedupEmailHash  String?
+
+  score           Int?
+  scoreVersion    String?
+
+  correlationId   String?
+  receivedAt      DateTime   @default(now())
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  source          LeadSource         @relation(fields: [sourceId], references: [id], onDelete: Restrict)
+  sourceAccount   LeadSourceAccount  @relation(fields: [sourceAccountId], references: [id], onDelete: Restrict)
+
+  rawPayloads     LeadRawPayload[]
+  processing      LeadProcessing?
+  stageEvents     LeadStageEvent[]
+  scores          LeadScore[]
+  duplicateOf     LeadDuplicate?     @relation("LeadDuplicate")
+  duplicates      LeadDuplicate[]    @relation("LeadOriginal")
+  routingResults  RoutingResult[]
+  deliveries      Delivery[]
+  webhookEvents   WebhookEvent[]
+
+  // IDEMPOTENCY: one lead per source account and external id.
+  // Postgres allows multiple NULLs, so sources without external ids are fine.
+  @@unique([sourceAccountId, externalLeadId])
+  // Dashboard / list queries.
+  @@index([createdAt])
+  @@index([status, createdAt])
+  @@index([sourceId, createdAt])
+  // Dedup lookups.
+  @@index([dedupPhoneHash])
+  @@index([dedupEmailHash])
+  // Correlation lookup.
+  @@index([correlationId])
+}
+
+// IMMUTABLE. The original bytes as received — never normalized away,
+// never updated after insert. Required for audit/debug/reprocess/recovery.
+model LeadRawPayload {
+  id              String   @id @default(cuid())
+  leadId          String
+  sourceAccountId String?
+  payload         Json
+  // Sanitized inbound headers (secrets redacted at intake).
+  headers         Json?
+  contentType     String?
+  // sha256 of the canonical JSON — detects payload tampering/drift.
+  checksum        String
+  receivedAt      DateTime @default(now())
+
+  lead   Lead   @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+  @@index([receivedAt])
+}
+
+// One row per lead: mutable processing state + per-stage results.
+model LeadProcessing {
+  id                   String              @id @default(cuid())
+  leadId               String              @unique
+  validationStatus     ValidationStatus    @default(PENDING)
+  deduplicationStatus  DeduplicationStatus @default(PENDING)
+  validationResult     Json?
+  normalizationResult  Json?
+  deduplicationResult  Json?
+  enrichmentResult     Json?
+  routingResult        Json?
+  correlationId        String?
+  startedAt            DateTime            @default(now())
+  finishedAt           DateTime?
+  error                String?
+  updatedAt            DateTime            @updatedAt
+
+  lead   Lead   @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([validationStatus])
+}
+
+// IMMUTABLE append-only processing timeline (the UI "pipeline view").
+model LeadStageEvent {
+  id            String      @id @default(cuid())
+  leadId        String
+  stage         LeadStage
+  status        StageStatus
+  startedAt     DateTime    @default(now())
+  finishedAt    DateTime?
+  durationMs    Int?
+  // Stage-specific detail (sanitized, no secrets).
+  detail        Json?
+  error         String?
+  correlationId String?
+
+  lead   Lead   @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId, startedAt])
+  @@index([stage, startedAt])
+}
+
+// IMMUTABLE score history — changing scoring rules NEVER rewrites history.
+model LeadScore {
+  id         String   @id @default(cuid())
+  leadId     String
+  score      Int
+  version    String
+  // e.g. [{ rule: "budget>5m", points: 20 }, …]
+  breakdown  Json     @default("[]")
+  computedAt DateTime @default(now())
+
+  lead   Lead   @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@unique([leadId, version])
+  @@index([computedAt])
+}
+
+// Duplicate relationships — duplicates are LINKED, never deleted.
+model LeadDuplicate {
+  id              String       @id @default(cuid())
+  // The newer lead flagged as duplicate…
+  leadId          String       @unique
+  // …of this earlier lead.
+  originalLeadId  String
+  strategy        MatchedField
+  // Hash of the matched value (no raw PII stored here).
+  matchedHash     String?
+  confidence      Float        @default(1.0)
+  createdAt       DateTime     @default(now())
+
+  lead     Lead   @relation("LeadDuplicate", fields: [leadId], references: [id], onDelete: Cascade)
+  original Lead   @relation("LeadOriginal", fields: [originalLeadId], references: [id], onDelete: Cascade)
+
+  @@index([originalLeadId])
+  @@index([createdAt])
+}
+
+// IMMUTABLE inbound webhook log (idempotency anchor for providers).
+model WebhookEvent {
+  id             String            @id @default(cuid())
+  sourceAccountId String
+  sourceId       String?
+  // Provider event id (Meta/Google) when present.
+  externalEventId String?
+  status         WebhookEventStatus @default(RECEIVED)
+  // SHA-256 of (sourceAccountId + externalEventId || raw body) — idempotency key.
+  idempotencyKey String
+  // Sanitized inbound headers (signatures redacted).
+  headers        Json?
+  payload        Json
+  leadId         String?
+  error          String?
+  receivedAt     DateTime          @default(now())
+  processedAt    DateTime?
+
+  sourceAccount LeadSourceAccount  @relation(fields: [sourceAccountId], references: [id], onDelete: Cascade)
+  source        LeadSource?        @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  lead          Lead?              @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  // DATABASE-LEVEL idempotency: an account event can only be persisted once.
+  @@unique([sourceAccountId, idempotencyKey])
+  @@index([receivedAt])
+  @@index([status, receivedAt])
+}
+
+// =============================================================================
+// ROUTING & FIELD MAPPING
+// =============================================================================
+
+model RoutingRule {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  enabled     Boolean  @default(true)
+  // Lower runs first.
+  priority    Int      @default(100)
+  // [{ field: "canonical.city", operator: EQ, value: "Chennai" }]
+  conditions  Json     @default("[]")
+  // Stop evaluating further rules when this one matches.
+  stopOnMatch Boolean  @default(true)
+  version     Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  destinations RoutingRuleDestination[]
+
+  @@index([enabled, priority])
+}
+
+model RoutingRuleDestination {
+  id            String   @id @default(cuid())
+  ruleId        String
+  destinationId String
+  order         Int      @default(0)
+
+  rule        RoutingRule           @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  destination Destination           @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+
+  @@unique([ruleId, destinationId])
+  @@index([destinationId])
+}
+
+model RoutingResult {
+  id              String   @id @default(cuid())
+  leadId          String
+  ruleId          String?
+  destinationIds  Json     @default("[]")
+  matched         Boolean  @default(false)
+  reason          String?
+  evaluatedAt     DateTime @default(now())
+
+  lead   Lead   @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId, evaluatedAt])
+}
+
+model FieldMapping {
+  id                String             @id @default(cuid())
+  destinationId     String
+  name              String
+  status            FieldMappingStatus @default(DRAFT)
+  activeVersionId   String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  destination Destination           @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+  versions    FieldMappingVersion[]
+
+  @@unique([destinationId, name])
+  @@index([status])
+}
+
+model FieldMappingVersion {
+  id         String   @id @default(cuid())
+  mappingId  String
+  version    Int
+  // [{ source: "full_name", target: "FirstName", transforms: [...], required, default }]
+  fields     Json     @default("[]")
+  notes      String?
+  createdBy  String?
+  createdAt  DateTime @default(now())
+
+  mapping FieldMapping @relation(fields: [mappingId], references: [id], onDelete: Cascade)
+
+  @@unique([mappingId, version])
+}
+
+// =============================================================================
+// DESTINATIONS & DELIVERY
+// =============================================================================
+
+model Destination {
+  id        String            @id @default(cuid())
+  type      DestinationType
+  name      String
+  status    DestinationStatus @default(ACTIVE)
+  // Non-secret config: base URL (custom API), instance region, module…
+  config    Json              @default("{}")
+  // Per-destination throughput guard (delivered requests/second).
+  rateLimitPerSec Int?
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  health        DestinationHealth?
+  credentials   IntegrationCredential[]
+  deliveries    Delivery[]
+  ruleTargets   RoutingRuleDestination[]
+  fieldMappings FieldMapping[]
+
+  @@unique([name])
+  @@index([type, status])
+}
+
+// Latest known connection state per destination (real probe results only).
+model DestinationHealth {
+  id             String           @id @default(cuid())
+  destinationId  String           @unique
+  status         ConnectionStatus @default(NOT_CONFIGURED)
+  lastSuccessAt  DateTime?
+  lastFailureAt  DateTime?
+  lastError      String?
+  lastLatencyMs  Int?
+  checkedAt      DateTime?
+  updatedAt      DateTime         @updatedAt
+
+  destination Destination @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+
+}
+
+// Delivery identity: exactly ONE delivery row per (lead, destination).
+// Fan-out retries/replays update this row; they can never duplicate it.
+model Delivery {
+  id             String         @id @default(cuid())
+  leadId         String
+  destinationId  String
+  status         DeliveryStatus @default(PENDING)
+  // GLOBAL attempt counter — never reset. Original cycle uses 1..maxAttempts,
+  // each replay appends a fresh cycle (attempts 6..10, 11..15, …).
+  attemptCount   Int            @default(0)
+  // Attempt cap for the CURRENT cycle; extended by the configured cycle size
+  // (DELIVERY_MAX_ATTEMPTS) on every replay.
+  maxAttempts    Int            @default(5)
+  // 0 = original delivery cycle; 1+ = number of explicit replays performed.
+  replayCount    Int            @default(0)
+  // Global attempt number where the current cycle began (1, 6, 11, …) —
+  // keeps the backoff ladder cycle-local while numbering stays global.
+  cycleStartAttempt Int         @default(1)
+  nextAttemptAt  DateTime?
+  // Snapshot of the mapped payload actually sent (or to be sent).
+  mappedPayload  Json?
+  // Destination-side record id — used for idempotent retries/upserts.
+  externalId     String?
+  correlationId  String?
+  errorCode      String?
+  errorMessage   String?
+  enqueuedAt     DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  lead        Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  destination Destination      @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+  attempts    DeliveryAttempt[]
+
+  @@unique([leadId, destinationId])
+  @@index([status, updatedAt])
+  @@index([destinationId, status])
+  @@index([status, nextAttemptAt])
+}
+
+// IMMUTABLE per-attempt record (sanitized request/response evidence).
+model DeliveryAttempt {
+  id            String               @id @default(cuid())
+  deliveryId    String
+  // Global, monotonic per delivery (1..5, 6..10, 11..15, …) — replays never
+  // reuse or renumber historical attempts (unique constraint below).
+  attemptNumber Int
+  // Replay cycle this attempt belongs to: 0 = original, 1 = first replay, …
+  replayCycle   Int                  @default(0)
+  status        DeliveryAttemptStatus
+  responseStatus Int?
+  // Sanitized, size-capped response body — secrets never stored.
+  responseBody  String?
+  errorCode     String?
+  errorCategory String?
+  durationMs    Int?
+  // Destination-side record id captured by this attempt.
+  externalId    String?
+  // Non-secret request metadata (URL, idempotency header name…).
+  requestMeta   Json?
+  startedAt     DateTime             @default(now())
+  finishedAt    DateTime?
+  workerId      String?
+
+  delivery Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+
+  @@unique([deliveryId, attemptNumber])
+  @@index([startedAt])
+  @@index([status])
+}
+
+// =============================================================================
+// CSV IMPORTS
+// =============================================================================
+
+model ImportJob {
+  id             String         @id @default(cuid())
+  sourceId       String?
+  sourceAccountId String?
+  // Sanitized display name + content hash (never the raw client filename path).
+  fileName       String
+  fileSizeBytes  Int
+  checksum       String
+  // Storage key (local driver path or S3 object key).
+  storageKey     String
+  status         ImportJobStatus @default(PENDING)
+  totalRows      Int?
+  processedRows  Int            @default(0)
+  successfulRows Int            @default(0)
+  failedRows     Int            @default(0)
+  duplicateRows  Int            @default(0)
+  errorReportKey String?
+  correlationId  String?
+  createdBy      String?
+  createdAt      DateTime       @default(now())
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  error          String?
+
+  source       LeadSource?       @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  sourceAccount LeadSourceAccount? @relation(fields: [sourceAccountId], references: [id], onDelete: SetNull)
+  rowErrors    ImportRowError[]
+
+  @@index([status, createdAt])
+  @@index([createdAt])
+}
+
+model ImportRowError {
+  id          String   @id @default(cuid())
+  importJobId String
+  rowNumber   Int
+  // The original row as parsed (for the downloadable error report).
+  rawRow      Json
+  error       String
+  createdAt   DateTime @default(now())
+
+  importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+
+  @@index([importJobId])
+}
+
+// =============================================================================
+// AUTOMATION CONFIGURATION
+// =============================================================================
+
+model DeduplicationConfig {
+  id           String        @id @default(cuid())
+  instanceKey  String        @unique @default("default")
+  enabled      Boolean       @default(false)
+  strategy     MatchedField  @default(PHONE)
+  // Additional custom fields for the CUSTOM strategy.
+  matchFields  String[]      @default([])
+  updatedAt    DateTime      @updatedAt
+  createdAt    DateTime      @default(now())
+
+}
+
+// Versioned scoring rules — historical LeadScore rows keep their version.
+model ScoringRuleSet {
+  id         String   @id @default(cuid())
+  name       String
+  version    String
+  enabled    Boolean  @default(false)
+  // [{ id, label, condition: { field, operator, value }, points }]
+  rules      Json     @default("[]")
+  activatedAt DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([version])
+  @@index([enabled])
+}
+
+// =============================================================================
+// AUDIT
+// =============================================================================
+
+// IMMUTABLE audit trail. Secrets are redacted before insertion — the schema
+// stores no credential material by design.
+model AuditLog {
+  id            String         @id @default(cuid())
+  actorType     AuditActorType
+  actorId       String?
+  actorLabel    String?
+  action        String
+  entityType    String
+  entityId      String?
+  ip            String?
+  userAgent     String?
+  correlationId String?
+  // Sanitized before/after snapshots (secrets stripped).
+  before        Json?
+  after         Json?
+  metadata      Json?
+  createdAt     DateTime       @default(now())
+
+  actor  User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+}

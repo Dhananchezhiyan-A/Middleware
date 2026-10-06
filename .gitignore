@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# Environment — never commit real secrets
+.env
+.env.local
+.env.*.local
+
+# Prisma generated client
+packages/database/src/generated/
+
+# Testing / coverage
+coverage/
+playwright-report/
+test-results/
+.vitest/
+
+# Synthetic E2E sink output — local test destination log, never committed
+*.ndjson
+scripts/sink-log.ndjson
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+logs/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Uploaded / processed files (local storage driver)
+storage/
+apps/uploads/*
+!apps/uploads/.gitkeep
+
+# Misc
+*.pid
+.cache/

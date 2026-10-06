@@ -1,0 +1,17 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Build-script approval (pnpm v11+). Only reviewed packages may run
+# install/postinstall scripts. Telemetry packages are explicitly denied.
+allowBuilds:
+  esbuild: true
+  prisma: true
+  "@prisma/engines": true
+  msgpackr-extract: true
+  sharp: true
+  "@tailwindcss/oxide": true
+  "@scarf/scarf": false
+
+minimumReleaseAgeExclude:
+  - bullmq@6.3.10

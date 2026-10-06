@@ -1,0 +1,3480 @@
+openapi: 3.1.0
+info:
+  title: Lead Integration & Distribution Middleware API
+  version: "1.0.0"
+  description: |
+    Multi-tenant lead intake, processing, routing and delivery API (NestJS).
+
+    ## Envelope
+    Every JSON response is wrapped:
+    ```json
+    { "success": true,  "data": { } }
+    { "success": false, "error": { "code": "VALIDATION_FAILED", "message": "...", "requestId": "req_...", "details": {} } }
+    ```
+    The CSV error download (`GET /imports/{id}/errors`) is the only endpoint that
+    bypasses the envelope (`@SkipTransform`, `Content-Type: text/csv`).
+
+    ## Status codes
+    Nest defaults are used (there is no `@HttpCode` anywhere): **every POST returns
+    201**, all other methods return 200. Failures never return 200 — except
+    `GET /health`, which always returns 200 (known deviation, see `x-known-issues`).
+
+    ## Authentication
+    - `Authorization: Bearer <JWT>` (access token, default TTL 900 s)
+    - `x-api-key: <raw API key>` (takes precedence when present)
+    - Public routes: auth register/login/refresh/logout, webhook ingress, health.
+    - Permissions are re-resolved from the tenant role **on every request**.
+
+    ## Pagination
+    Cursor-based on list endpoints: `cursor` (opaque, ≤512 chars) + `limit`
+    (1–100, default 25). Response: `{ items, nextCursor }` (+ `total` on leads and
+    deliveries). Bare-array responses (no pagination) exist for reference data:
+    sources, source accounts, destinations, destination types, roles, routing
+    rules, scoring sets, analytics rows — all tenant-scoped but unbounded (audit
+    finding H-8).
+
+    ## Rate limits
+    300 req/min/IP global; 20/min on register/login/refresh; 600/min on webhook
+    ingress. 429 → `RATE_LIMITED`.
+
+    ## Idempotency
+    `Idempotency-Key` is **not** read anywhere. Real idempotency comes from DB
+    uniques: webhook events `(tenant, account, externalEventId)`, leads
+    `(tenant, sourceAccount, externalLeadId)` (optional field — finding H-5),
+    deliveries `(tenant, lead, destination)`, attempts `(tenant, delivery,
+    attemptNumber)`. Outbound delivery requests carry `Idempotency-Key`.
+
+    ## x-audit-status
+    This spec documents **only endpoints that exist in code** (81 operations, all
+    `x-audit-status: implemented`, except `GET /automation/enrichment` and
+    `GET /health` which are `partial`). Planned/missing endpoints are listed in
+    `docs/api-gaps.md` and are intentionally absent here.
+
+    ## x-known-issues (from docs/api-security-audit.md)
+    - H-1: `GET /deliveries/dead-letter` and `GET /deliveries/failed` return job
+      data of **all tenants** (global BullMQ view) — cross-tenant read.
+    - H-2: `POST /api-keys` with default `scopes: []` yields a wildcard `*`
+      (all-permissions) key.
+    - H-6: webhook ingress returns **201** although internal docs specify 202.
+    - H-10: `GET /health` returns 200 even when degraded and does not check the worker.
+servers:
+  - url: http://localhost:4000/api/v1
+    description: Local development API (all paths below are relative to /api/v1)
+tags:
+  - name: auth
+    description: Registration, login, token refresh, session bootstrap
+  - name: tenants
+    description: Workspace (current tenant) read/rename
+  - name: users
+    description: Tenant user management
+  - name: roles
+    description: Roles and the permission catalog
+  - name: api-keys
+    description: Programmatic API keys (x-api-key auth)
+  - name: audit-logs
+    description: Immutable audit trail
+  - name: leads
+    description: Lead CRUD, timeline, raw payloads, pipeline replay
+  - name: sources
+    description: Lead sources, inbound accounts, webhook URLs, secret rotation
+  - name: webhooks
+    description: Signed public ingress and event history
+  - name: destinations
+    description: Delivery targets, credentials, health, connection tests
+  - name: field-mappings
+    description: Versioned destination field mappings
+  - name: routing-rules
+    description: Priority-based routing rules
+  - name: automation
+    description: Scoring rule sets, deduplication config, enrichment status
+  - name: deliveries
+    description: Delivery records, attempts, replay, queue views
+  - name: imports
+    description: Asynchronous CSV import jobs
+  - name: analytics
+    description: Server-side aggregated metrics
+  - name: health
+    description: Liveness/readiness probe
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+paths:
+  /auth/register:
+    post:
+      tags: [auth]
+      operationId: authRegister
+      summary: Create a new tenant (workspace) with an admin user
+      description: |
+        Creates tenant + admin user + system roles in one transaction. The refresh
+        token is also set as an httpOnly cookie scoped to `/api/v1/auth`.
+      x-audit-status: implemented
+      x-permission: public
+      x-rate-limit: "20/min"
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterRequest" }
+      responses:
+        "201":
+          description: Tenant created; tokens issued
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/AuthSession" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: authLogin
+      summary: Exchange credentials for access + refresh tokens
+      description: Generic 401 for bad credentials (no user enumeration). Failures are audited.
+      x-audit-status: implemented
+      x-permission: public
+      x-rate-limit: "20/min"
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "201":
+          description: Tokens issued; refresh token also set as httpOnly cookie
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/AuthSession" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /auth/refresh:
+    post:
+      tags: [auth]
+      operationId: authRefresh
+      summary: Rotate the refresh token and issue a new access token
+      description: |
+        Refresh token from the httpOnly cookie or the request body. Rotation is
+        mandatory: reuse of an already-rotated token revokes ALL sessions of the
+        user (audited as `auth.refresh.reuse`). Origin header is checked when present.
+      x-audit-status: implemented
+      x-permission: public
+      x-rate-limit: "20/min"
+      security: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "201":
+          description: New token pair; refresh cookie replaced
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/AuthSession" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: authLogout
+      summary: Revoke the current session and clear the refresh cookie
+      description: |
+        Accepts the refresh cookie or `{refreshToken}` in the body; possession of
+        the refresh token is sufficient (no bearer required). Already-issued access
+        tokens remain valid until expiry (finding H-3, ≤ JWT_ACCESS_TTL).
+        Known gap (H-7): logout is not audit-logged.
+      x-audit-status: implemented
+      x-permission: public
+      security: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "201":
+          description: Session revoked
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/RevokedAck" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /auth/me:
+    get:
+      tags: [auth]
+      operationId: authMe
+      summary: Current user, tenant and effective permissions (web bootstrap)
+      x-audit-status: implemented
+      x-permission: authenticated (self-scoped)
+      responses:
+        "200":
+          description: Session principal
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/MeResult" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /tenants/me:
+    get:
+      tags: [tenants]
+      operationId: tenantsGetMe
+      summary: Current workspace (id, name, slug, status)
+      x-audit-status: implemented
+      x-permission: authenticated (self-scoped)
+      responses:
+        "200":
+          description: Workspace summary
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/TenantSummary" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    patch:
+      tags: [tenants]
+      operationId: tenantsUpdateMe
+      summary: Rename the current workspace (slug is immutable)
+      x-audit-status: implemented
+      x-permission: tenant:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TenantUpdateRequest" }
+      responses:
+        "200":
+          description: Updated workspace
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/TenantSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /users:
+    get:
+      tags: [users]
+      operationId: usersList
+      summary: List tenant users (cursor paginated)
+      x-audit-status: implemented
+      x-permission: users:read
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Page of users with role summaries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/UserListData" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    post:
+      tags: [users]
+      operationId: usersCreate
+      summary: Create a user with a role
+      description: Password is bcrypt-hashed (cost 12) and never returned.
+      x-audit-status: implemented
+      x-permission: users:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserCreateRequest" }
+      responses:
+        "201":
+          description: User created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/UserListItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /users/{id}:
+    patch:
+      tags: [users]
+      operationId: usersUpdate
+      summary: Update a user (name, role, status — activate/deactivate)
+      description: Self-disabling is refused (403). Cross-tenant id → 404.
+      x-audit-status: implemented
+      x-permission: users:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserUpdateRequest" }
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/UserListItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /roles:
+    get:
+      tags: [roles]
+      operationId: rolesList
+      summary: List roles with permission arrays and user counts
+      description: Returns a **bare array** (tenant-scoped, unbounded — finding H-8).
+      x-audit-status: implemented
+      x-permission: roles:read
+      responses:
+        "200":
+          description: All tenant roles
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/RoleListItem" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [roles]
+      operationId: rolesCreate
+      summary: Create a custom role
+      description: Permissions must be valid catalog codes (34 available); wildcard not allowed.
+      x-audit-status: implemented
+      x-permission: roles:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RoleUpsertRequest" }
+      responses:
+        "201":
+          description: Role created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/RoleListItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /roles/permissions:
+    get:
+      tags: [roles]
+      operationId: rolesPermissionCatalog
+      summary: Permission catalog + role templates
+      description: Serves the product requirement "GET /permissions" (canonical path is /roles/permissions).
+      x-audit-status: implemented
+      x-permission: roles:read
+      responses:
+        "200":
+          description: Catalog
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/PermissionCatalog" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /roles/{id}:
+    patch:
+      tags: [roles]
+      operationId: rolesUpdate
+      summary: Update a role (system roles are immutable)
+      x-audit-status: implemented
+      x-permission: roles:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RoleUpsertRequest" }
+      responses:
+        "200":
+          description: Updated role
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/RoleListItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [roles]
+      operationId: rolesDelete
+      summary: Delete a role (refused while assigned or system)
+      x-audit-status: implemented
+      x-permission: roles:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Role deleted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DeletedAck" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api-keys:
+    get:
+      tags: [api-keys]
+      operationId: apiKeysList
+      summary: List API keys (hash never returned; cursor paginated)
+      x-audit-status: implemented
+      x-permission: apikeys:read
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Page of API keys
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ApiKeyListData" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [api-keys]
+      operationId: apiKeysCreate
+      summary: Create an API key — raw value returned ONCE
+      description: |
+        `scopes` defaults to `[]`, which the guard maps to wildcard `*`
+        (all permissions) — **finding H-2: default = super-admin key**.
+      x-audit-status: implemented
+      x-permission: apikeys:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApiKeyCreateRequest" }
+      responses:
+        "201":
+          description: Key created; `apiKey` is shown only here
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ApiKeyCreated" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api-keys/{id}:
+    delete:
+      tags: [api-keys]
+      operationId: apiKeysRevoke
+      summary: Revoke an API key (idempotent)
+      x-audit-status: implemented
+      x-permission: apikeys:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Revoked (also true when already revoked)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/RevokedAck" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /audit-logs:
+    get:
+      tags: [audit-logs]
+      operationId: auditLogsList
+      summary: Query the audit trail (tenant-scoped, cursor paginated)
+      description: Metadata is secret-stripped (tokens/keys/passwords removed) before storage and response.
+      x-audit-status: implemented
+      x-permission: audit:read
+      parameters:
+        - name: action
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: entityType
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: entityId
+          in: query
+          schema: { type: string, maxLength: 64 }
+        - name: actorId
+          in: query
+          schema: { type: string, maxLength: 64 }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Page of audit entries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/AuditLogListData" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /leads:
+    get:
+      tags: [leads]
+      operationId: leadsList
+      summary: List/filter leads (cursor paginated, includes total)
+      x-audit-status: implemented
+      x-permission: leads:read
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [RECEIVED, PROCESSING, PROCESSED, REJECTED, FAILED]
+        - name: sourceId
+          in: query
+          schema: { type: string, maxLength: 64 }
+        - name: destinationId
+          in: query
+          schema: { type: string, maxLength: 64 }
+        - name: scoreMin
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 1000 }
+        - name: q
+          in: query
+          description: Free-text filter (server-side)
+          schema: { type: string, maxLength: 200 }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: sort
+          in: query
+          schema: { type: string, enum: ["receivedAt:asc", "receivedAt:desc"] }
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Page of leads
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/LeadListData" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [leads]
+      operationId: leadsCreate
+      summary: Manually create a lead (enqueues intake)
+      description: |
+        409 `LEAD_DUPLICATE` on a second insert with the same
+        `(tenant, sourceAccountId, externalLeadId)`. Without `externalLeadId`
+        retries create duplicates — `Idempotency-Key` is not honored (finding H-5).
+      x-audit-status: implemented
+      x-permission: leads:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LeadCreateRequest" }
+      responses:
+        "201":
+          description: Lead accepted (status RECEIVED); intake job enqueued
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/LeadListItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /leads/{id}:
+    get:
+      tags: [leads]
+      operationId: leadsGet
+      summary: Lead detail (source, account, processing, scores, duplicates, deliveries)
+      description: Cross-tenant id → 404. Deliveries embed their **last 3 attempts** each.
+      x-audit-status: implemented
+      x-permission: leads:read
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Lead detail
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/LeadDetail" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [leads]
+      operationId: leadsDelete
+      summary: Hard-delete a lead (audited)
+      description: No frontend consumer today (inventory §E).
+      x-audit-status: implemented
+      x-permission: leads:delete
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DeletedAck" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /leads/{id}/timeline:
+    get:
+      tags: [leads]
+      operationId: leadsTimeline
+      summary: Stage events, score history and routing results (all immutable)
+      x-audit-status: implemented
+      x-permission: leads:read
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Timeline
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/TimelineData" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /leads/{id}/payloads:
+    get:
+      tags: [leads]
+      operationId: leadsPayloads
+      summary: Raw inbound payloads + canonical/normalized snapshots
+      description: Raw payload content is returned unsanitized (tenant-only, accepted risk H-9).
+      x-audit-status: implemented
+      x-permission: leads:read
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Payloads
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/LeadPayloadsData" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /leads/{id}/replay:
+    post:
+      tags: [leads]
+      operationId: leadsReplay
+      summary: Re-run the whole pipeline for one lead
+      description: Response field is `replayed` (web types expect `queued` — mismatch I-2).
+      x-audit-status: implemented
+      x-permission: leads:replay
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "201":
+          description: Pipeline replay enqueued (audited)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ReplayedAck" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /sources:
+    get:
+      tags: [sources]
+      operationId: sourcesList
+      summary: List lead sources with account/lead counts
+      description: Returns a **bare array** (tenant-scoped, unbounded — finding H-8).
+      x-audit-status: implemented
+      x-permission: sources:read
+      responses:
+        "200":
+          description: All tenant sources
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/SourceItem" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [sources]
+      operationId: sourcesCreate
+      summary: Create a lead source
+      description: '`code` is tenant-unique (lowercase-kebab). Source activation/deactivation does not exist (no status column).'
+      x-audit-status: implemented
+      x-permission: sources:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SourceCreateRequest" }
+      responses:
+        "201":
+          description: Source created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/SourceItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /sources/{id}:
+    get:
+      tags: [sources]
+      operationId: sourcesGet
+      summary: Source detail with its inbound accounts
+      x-audit-status: implemented
+      x-permission: sources:read
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Source + accounts
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/SourceDetail" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [sources]
+      operationId: sourcesUpdate
+      summary: Update a source (name/config only)
+      description: '**No status/activation field exists** — `sourceUpdateSchema` is `{name?, config?}` only.'
+      x-audit-status: implemented
+      x-permission: sources:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SourceUpdateRequest" }
+      responses:
+        "200":
+          description: Updated source
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/SourceItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [sources]
+      operationId: sourcesDelete
+      summary: Delete a source (409 while leads/accounts are attached)
+      x-audit-status: implemented
+      x-permission: sources:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DeletedAck" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /sources/{id}/accounts:
+    get:
+      tags: [sources]
+      operationId: sourceAccountsList
+      summary: List inbound accounts (each with its webhook URL)
+      description: Returns a **bare array**; the server appends `webhookUrl` to every row.
+      x-audit-status: implemented
+      x-permission: sources:read
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Accounts
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/SourceAccount" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [sources]
+      operationId: sourceAccountsCreate
+      summary: Create an inbound account; signing secret returned ONCE
+      description: |
+        A `publicId` and (for webhook-bearing source types) an HMAC signing secret
+        are generated. The secret is never retrievable again — rotate to get a new one.
+      x-audit-status: implemented
+      x-permission: sources:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountCreateRequest" }
+      responses:
+        "201":
+          description: Account created (may include `signingSecret` once)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/SourceAccount" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /sources/accounts/{accountId}:
+    patch:
+      tags: [sources]
+      operationId: sourceAccountsUpdate
+      summary: Update an inbound account (name/config)
+      description: Not nested under `/sources/{id}` — naming inconsistency noted in api-inventory §Naming.
+      x-audit-status: implemented
+      x-permission: sources:write
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema: { type: string, maxLength: 64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountUpdateRequest" }
+      responses:
+        "200":
+          description: Updated account
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/SourceAccount" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [sources]
+      operationId: sourceAccountsDelete
+      summary: Delete an account (409 while leads are attached)
+      x-audit-status: implemented
+      x-permission: sources:write
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema: { type: string, maxLength: 64 }
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DeletedAck" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /sources/accounts/{accountId}/rotate-secret:
+    post:
+      tags: [sources]
+      operationId: sourceAccountsRotateSecret
+      summary: Rotate the webhook signing secret (returned ONCE)
+      x-audit-status: implemented
+      x-permission: sources:write
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema: { type: string, maxLength: 64 }
+      responses:
+        "201":
+          description: New secret
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/SigningSecretAck" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /webhooks/inbound/{publicId}:
+    post:
+      tags: [webhooks]
+      operationId: webhookIngress
+      summary: Public signed lead ingress (raw body HMAC-SHA256)
+      description: |
+        Unauthenticated by token: identified by unguessable `publicId` → account →
+        tenant/source. Signature header: `x-signature` / `x-hub-signature-256` /
+        `x-middleware-signature` (hex HMAC-SHA256 over the **raw body**, timing-safe
+        compare). Verification runs when the account has a secret; unsigned traffic
+        is accepted if no secret exists unless `requireSignature` is set (finding H-6).
+        Idempotency: `@@unique(tenant, account, externalEventId)` — duplicates ack
+        with `duplicate: true` and resume the original lead. Fast-ack 201; enqueue
+        failure → 503.
+      x-audit-status: implemented
+      x-permission: public
+      x-rate-limit: "600/min"
+      security: []
+      parameters:
+        - name: publicId
+          in: path
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 64 }
+      requestBody:
+        required: true
+        description: Arbitrary provider payload (object or array) — kept as raw bytes for HMAC.
+        content:
+          application/json:
+            schema:
+              description: Provider-specific JSON; shape is intentionally `unknown`.
+      responses:
+        "201":
+          description: Accepted and enqueued (or acknowledged as duplicate)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/WebhookAck" }
+        "401":
+          description: Signature verification failed (`WEBHOOK_SIGNATURE_INVALID`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Unknown publicId (`WEBHOOK_UNKNOWN_SOURCE`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "422":
+          description: Unprocessable payload (`WEBHOOK_PAYLOAD_INVALID`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /webhooks/events:
+    get:
+      tags: [webhooks]
+      operationId: webhookEventsList
+      summary: Inbound webhook event history (cursor paginated)
+      description: Query is NOT zod-validated (inline types — audit note). No frontend consumer yet.
+      x-audit-status: implemented
+      x-permission: sources:read
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [RECEIVED, PROCESSED, FAILED, DUPLICATE]
+        - name: sourceAccountId
+          in: query
+          schema: { type: string, maxLength: 64 }
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Page of events
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/WebhookEventListData" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /webhooks/events/{id}:
+    get:
+      tags: [webhooks]
+      operationId: webhookEventsGet
+      summary: Single event detail (payload sanitized)
+      x-audit-status: implemented
+      x-permission: sources:read
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Event
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/WebhookEventDetail" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /destinations/types:
+    get:
+      tags: [destinations]
+      operationId: destinationTypes
+      summary: Destination types + the config keys each adapter requires
+      description: Returns a **bare array** (static reference data).
+      x-audit-status: implemented
+      x-permission: destinations:read
+      responses:
+        "200":
+          description: Types
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/DestinationTypeInfo" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /destinations:
+    get:
+      tags: [destinations]
+      operationId: destinationsList
+      summary: List destinations (health + counts)
+      description: Returns a **bare array** (tenant-scoped, unbounded — finding H-8).
+      x-audit-status: implemented
+      x-permission: destinations:read
+      responses:
+        "200":
+          description: All tenant destinations
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/DestinationItem" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [destinations]
+      operationId: destinationsCreate
+      summary: Create a destination
+      description: Name is tenant-unique. Credentials are set separately via `/destinations/{id}/credential`.
+      x-audit-status: implemented
+      x-permission: destinations:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DestinationCreateRequest" }
+      responses:
+        "201":
+          description: Destination created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DestinationItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /destinations/{id}:
+    get:
+      tags: [destinations]
+      operationId: destinationsGet
+      summary: Destination detail (credential metadata only — never the secret)
+      x-audit-status: implemented
+      x-permission: destinations:read
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Destination
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DestinationItem" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [destinations]
+      operationId: destinationsUpdate
+      summary: Update a destination (name, status = activate/deactivate, config, rate limit)
+      x-audit-status: implemented
+      x-permission: destinations:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DestinationUpdateRequest" }
+      responses:
+        "200":
+          description: Updated destination
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DestinationItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [destinations]
+      operationId: destinationsDelete
+      summary: Delete a destination and its health row
+      x-audit-status: implemented
+      x-permission: destinations:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DeletedAck" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /destinations/{id}/credential:
+    put:
+      tags: [destinations]
+      operationId: destinationsSetCredential
+      summary: Set/replace the destination credential (write-only)
+      description: Secret is AES-256-GCM encrypted at rest and never returned by any endpoint.
+      x-audit-status: implemented
+      x-permission: destinations:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CredentialSetRequest" }
+      responses:
+        "200":
+          description: Stored
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/StoredAck" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [destinations]
+      operationId: destinationsRemoveCredential
+      summary: Remove the destination credential
+      x-audit-status: implemented
+      x-permission: destinations:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Removed
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/RemovedAck" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /destinations/{id}/health:
+    get:
+      tags: [destinations]
+      operationId: destinationsHealth
+      summary: Last stored health probe result
+      description: No frontend consumer today (inventory §E) — UI uses the active `/test` probe instead.
+      x-audit-status: implemented
+      x-permission: destinations:read
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Health row (or NOT_CONFIGURED defaults)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DestinationHealth" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /destinations/{id}/test:
+    post:
+      tags: [destinations]
+      operationId: destinationsTest
+      summary: Real outbound connection test through the SSRF-safe adapter
+      description: Audited (`destination.tested`). Egress guarded by safeFetch (DNS-rebinding-aware private-IP block).
+      x-audit-status: implemented
+      x-permission: destinations:test
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "201":
+          description: Probe result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DestinationTestResult" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /field-mappings:
+    get:
+      tags: [field-mappings]
+      operationId: fieldMappingsList
+      summary: List field mappings (cursor paginated)
+      x-audit-status: implemented
+      x-permission: mappings:read
+      parameters:
+        - name: destinationId
+          in: query
+          schema: { type: string, maxLength: 64 }
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Page of mappings
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/FieldMappingListData" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [field-mappings]
+      operationId: fieldMappingsCreate
+      summary: Create a mapping with its first version
+      description: 'Optional `activate: true` marks version 1 ACTIVE immediately.'
+      x-audit-status: implemented
+      x-permission: mappings:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FieldMappingCreateRequest" }
+      responses:
+        "201":
+          description: Mapping + version 1 created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/FieldMappingDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /field-mappings/{id}:
+    get:
+      tags: [field-mappings]
+      operationId: fieldMappingsGet
+      summary: Mapping detail with all versions
+      x-audit-status: implemented
+      x-permission: mappings:read
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Mapping
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/FieldMappingDetail" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [field-mappings]
+      operationId: fieldMappingsDelete
+      summary: Delete a mapping and its versions
+      x-audit-status: implemented
+      x-permission: mappings:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DeletedAck" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /field-mappings/{id}/versions:
+    post:
+      tags: [field-mappings]
+      operationId: fieldMappingsAddVersion
+      summary: Append an immutable version (edits never overwrite)
+      x-audit-status: implemented
+      x-permission: mappings:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FieldMappingVersionRequest" }
+      responses:
+        "201":
+          description: New version created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/FieldMappingVersion" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /field-mappings/{id}/activate:
+    post:
+      tags: [field-mappings]
+      operationId: fieldMappingsActivate
+      summary: Activate a version (= publish; rollback = activate an older one)
+      x-audit-status: implemented
+      x-permission: mappings:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FieldMappingActivateRequest" }
+      responses:
+        "201":
+          description: Mapping with the new active version
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/FieldMappingDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /routing-rules:
+    get:
+      tags: [routing-rules]
+      operationId: routingRulesList
+      summary: List routing rules ordered by priority (with destinations)
+      description: Returns a **bare array** (tenant-scoped, unbounded — finding H-8).
+      x-audit-status: implemented
+      x-permission: routing:read
+      responses:
+        "200":
+          description: All tenant routing rules
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/RoutingRule" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [routing-rules]
+      operationId: routingRulesCreate
+      summary: Create a routing rule (min 1 condition, 1–20 target destinations)
+      x-audit-status: implemented
+      x-permission: routing:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RoutingRuleUpsertRequest" }
+      responses:
+        "201":
+          description: Rule created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/RoutingRule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /routing-rules/{id}:
+    patch:
+      tags: [routing-rules]
+      operationId: routingRulesUpdate
+      summary: Partial-update a rule (enabled = enable/disable; bumps version)
+      description: All body fields optional (merge-patch). Priority changes reorder evaluation.
+      x-audit-status: implemented
+      x-permission: routing:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RoutingRuleUpsertRequest" }
+      responses:
+        "200":
+          description: Updated rule
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/RoutingRule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [routing-rules]
+      operationId: routingRulesDelete
+      summary: Delete a routing rule
+      x-audit-status: implemented
+      x-permission: routing:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DeletedAck" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /automation/scoring:
+    get:
+      tags: [automation]
+      operationId: scoringList
+      summary: List immutable scoring rule-set versions
+      description: Returns a **bare array** (tenant-scoped, unbounded — finding H-8).
+      x-audit-status: implemented
+      x-permission: scoring:read
+      responses:
+        "200":
+          description: Rule sets, newest first
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/ScoringRuleSet" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [automation]
+      operationId: scoringCreate
+      summary: Append a new scoring rule-set version
+      description: 'When `enabled: true`, all sibling sets are disabled in the same transaction (exactly one active).'
+      x-audit-status: implemented
+      x-permission: scoring:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScoringRuleSetUpsertRequest" }
+      responses:
+        "201":
+          description: New version created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ScoringRuleSet" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /automation/scoring/{id}:
+    patch:
+      tags: [automation]
+      operationId: scoringSetEnabled
+      summary: Enable/disable one scoring version
+      x-audit-status: implemented
+      x-permission: scoring:write
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EnabledPatch" }
+      responses:
+        "200":
+          description: Updated rule set
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ScoringRuleSet" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /automation/dedup:
+    get:
+      tags: [automation]
+      operationId: dedupGet
+      summary: Read the deduplication config
+      description: |
+        **Side effect:** lazily creates the default config
+        (`enabled: false, strategy: PHONE`) on first read — a write on a `dedup:read`
+        path that is not audit-logged (finding H-7).
+      x-audit-status: implemented
+      x-permission: dedup:read
+      responses:
+        "200":
+          description: Config
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DedupConfig" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      tags: [automation]
+      operationId: dedupPut
+      summary: Full-replace the deduplication config (audited)
+      x-audit-status: implemented
+      x-permission: dedup:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DedupConfigRequest" }
+      responses:
+        "200":
+          description: Saved config
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DedupConfig" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /automation/enrichment:
+    get:
+      tags: [automation]
+      operationId: enrichmentStatus
+      summary: Enrichment status (honest stub — feature not implemented)
+      description: |
+        PARTIAL: enrichment has no providers; the worker stage records
+        `{skipped: true}` and marks the stage SKIPPED. Reported honestly instead
+        of pretending (x-audit-status: partial).
+      x-audit-status: partial
+      x-permission: enrichment:read
+      responses:
+        "200":
+          description: Status stub
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/EnrichmentStatus" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /deliveries:
+    get:
+      tags: [deliveries]
+      operationId: deliveriesList
+      summary: List deliveries (cursor paginated, includes total)
+      x-audit-status: implemented
+      x-permission: deliveries:read
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, QUEUED, IN_PROGRESS, SUCCEEDED, FAILED, DEAD, SKIPPED]
+        - name: destinationId
+          in: query
+          schema: { type: string, maxLength: 64 }
+        - name: leadId
+          in: query
+          schema: { type: string, maxLength: 64 }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Page of deliveries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DeliveryListData" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /deliveries/queue-stats:
+    get:
+      tags: [deliveries]
+      operationId: deliveriesQueueStats
+      summary: BullMQ job counts per queue + DLQ (GLOBAL, all tenants)
+      description: |
+        **Tenant-unscoped by design of BullMQ counters** (finding H-1a): shows
+        aggregate counts of every tenant's queues. Per-queue errors are returned
+        verbatim as `{error}` entries.
+      x-audit-status: implemented
+      x-permission: deliveries:read
+      responses:
+        "200":
+          description: Queue statistics
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/QueueStats" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /deliveries/dead-letter:
+    get:
+      tags: [deliveries]
+      operationId: deliveriesDeadLetter
+      summary: Jobs in DLQ queues (GLOBAL — returns other tenants' job.data)
+      description: |
+        **BROKEN tenant scoping (finding H-1):** raw BullMQ `job.data` includes
+        tenantId/leadId/payloads of **all tenants**. Query params are not
+        zod-validated (manual Number()). One-shot benchmark coverage only.
+      x-audit-status: implemented
+      x-permission: deliveries:read
+      parameters:
+        - name: queue
+          in: query
+          description: Queue base name (e.g. `delivery`) or full DLQ name (`delivery-dlq`).
+          schema: { type: string, maxLength: 64 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, default: 50 }
+      responses:
+        "200":
+          description: Dead-letter jobs (or `{error}` entries when Redis is unavailable)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/QueueJob" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /deliveries/failed:
+    get:
+      tags: [deliveries]
+      operationId: deliveriesFailed
+      summary: Failed (not yet dead) jobs per queue (GLOBAL — same H-1 leak)
+      x-audit-status: implemented
+      x-permission: deliveries:read
+      parameters:
+        - name: queue
+          in: query
+          schema: { type: string, maxLength: 64 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, default: 50 }
+      responses:
+        "200":
+          description: Failed jobs (or `{error}` entries when Redis is unavailable)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/QueueJob" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /deliveries/{id}:
+    get:
+      tags: [deliveries]
+      operationId: deliveriesGet
+      summary: Delivery detail with its immutable attempt history
+      description: Attempt rows carry replayCycle/replayCycleAttempt/cycleStartAttempt (append-only, never rewritten).
+      x-audit-status: implemented
+      x-permission: deliveries:read
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Delivery + attempts
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/DeliveryDetail" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /deliveries/{id}/replay:
+    post:
+      tags: [deliveries]
+      operationId: deliveriesReplay
+      summary: Append-only replay of one delivery (opens a new replay cycle)
+      description: |
+        409 while PENDING/QUEUED/IN_PROGRESS/SUCCEEDED (guards concurrent replay);
+        410 `DELIVERY_DEAD` needs the lead-level replay path instead. Each replay
+        increments the global attempt counter and adds +5 to maxAttempts for the new
+        cycle; historical attempts stay immutable. Audited (`delivery.replayed`).
+      x-audit-status: implemented
+      x-permission: deliveries:retry
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "201":
+          description: Retry queued
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/QueuedAck" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "410":
+          description: Delivery is dead (`DELIVERY_DEAD`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /imports:
+    get:
+      tags: [imports]
+      operationId: importsList
+      summary: List CSV import jobs (cursor paginated)
+      x-audit-status: implemented
+      x-permission: imports:read
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, PARSING, PROCESSING, COMPLETED, FAILED, CANCELLED]
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Page of import jobs
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ImportListData" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [imports]
+      operationId: importsCreate
+      summary: Upload a CSV and queue it for asynchronous import
+      description: |
+        multipart/form-data: `file` (≤ 50 MB) + `sourceId`. Validation happens in
+        the worker (row errors are persisted per row). Queued on `csv-import`;
+        queue down → job marked FAILED + 503. Audited (`import.created`).
+        `POST /imports/{id}/cancel` does **not** exist although worker and enum
+        support CANCELLED (gap doc §17).
+      x-audit-status: implemented
+      x-permission: imports:write
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, sourceId]
+              properties:
+                file: { type: string, format: binary, description: CSV file }
+                sourceId: { type: string, maxLength: 64 }
+      responses:
+        "201":
+          description: Job created and enqueued (safe list shape — no storageKey)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ImportJob" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "422":
+          description: Missing/invalid file or body (`IMPORT_FILE_INVALID` / `VALIDATION_FAILED`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /imports/{id}:
+    get:
+      tags: [imports]
+      operationId: importsGet
+      summary: Import job detail/progress
+      description: '**Finding H-9:** unlike the list, the detail row includes `storageKey` + `checksum`.'
+      x-audit-status: implemented
+      x-permission: imports:read
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Job detail
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ImportJobDetail" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /imports/{id}/errors:
+    get:
+      tags: [imports]
+      operationId: importsDownloadErrors
+      summary: Download row errors as CSV (audited download)
+      description: 'Envelope bypassed (`@SkipTransform`); capped at 10 000 rows; `Content-Type: text/csv`.'
+      x-audit-status: implemented
+      x-permission: imports:read
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: CSV error report
+          content:
+            text/csv:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /analytics/overview:
+    get:
+      tags: [analytics]
+      operationId: analyticsOverview
+      summary: KPI overview (real PostgreSQL aggregates)
+      x-audit-status: implemented
+      x-permission: analytics:read
+      responses:
+        "200":
+          description: Overview
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/AnalyticsOverview" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /analytics/timeseries:
+    get:
+      tags: [analytics]
+      operationId: analyticsTimeseries
+      summary: Daily intake + delivery outcomes (1–90 days, SQL group-by)
+      x-audit-status: implemented
+      x-permission: analytics:read
+      parameters:
+        - name: days
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 90, default: 30 }
+      responses:
+        "200":
+          description: Series
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/TimeseriesData" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /analytics/sources:
+    get:
+      tags: [analytics]
+      operationId: analyticsSources
+      summary: Per-source lead counts grouped by status (groupBy)
+      x-audit-status: implemented
+      x-permission: analytics:read
+      responses:
+        "200":
+          description: Source performance
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/SourcePerformanceRow" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /analytics/destinations:
+    get:
+      tags: [analytics]
+      operationId: analyticsDestinations
+      summary: Per-destination outcomes + latency
+      description: Implementation loads all tenant delivery rows into JS — hot spot (finding H-8).
+      x-audit-status: implemented
+      x-permission: analytics:read
+      responses:
+        "200":
+          description: Destination performance
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/DestinationPerformanceRow" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /analytics/pipeline:
+    get:
+      tags: [analytics]
+      operationId: analyticsPipeline
+      summary: Stage funnel (leads grouped by current stage)
+      x-audit-status: implemented
+      x-permission: analytics:read
+      responses:
+        "200":
+          description: Funnel
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/PipelineFunnel" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /health:
+    get:
+      tags: [health]
+      operationId: healthGet
+      summary: Liveness probe with real PostgreSQL + Redis checks
+      description: |
+        PARTIAL (finding H-10): always returns **200** even when `status: degraded`,
+        error strings are exposed verbatim, and the worker/BullMQ consumer is not
+        checked. No unprefixed `/health` exists (no deployment target yet).
+      x-audit-status: partial
+      x-permission: public
+      security: []
+      responses:
+        "200":
+          description: Health report (ok or degraded — code stays 200, see description)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/HealthReport" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Short-lived access token (default TTL 900 s). Verified by signature, then
+        the user/role/tenant are re-loaded from the database on **every** request
+        (status checks always fresh). Finding H-3: revoking sessions does not
+        invalidate already-issued access tokens until expiry.
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: |
+        Long-lived API key (raw value shown once at creation, SHA-256 hash stored).
+        Takes precedence over the bearer header. Status/revoked/expiry/tenant are
+        checked; the owning user's status is **not** (finding H-4), and empty
+        scopes map to the wildcard permission `*` (finding H-2).
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      description: Tenant-scoped resource id (cross-tenant → 404)
+      schema: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9_-]+$" }
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor from the previous page's `nextCursor`
+      schema: { type: string, maxLength: 512 }
+    Limit:
+      name: limit
+      in: query
+      description: Page size
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+  responses:
+    BadRequest:
+      description: Request validation failed (zod DTO pipe) — `BAD_REQUEST` with `details[]`
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthenticated:
+      description: Missing/invalid/expired credentials — `UNAUTHENTICATED` or `TOKEN_EXPIRED`
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Authenticated but not permitted (or self-disable / suspended tenant) — `FORBIDDEN`
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Not found **or** exists in another tenant (anti-enumeration) — `NOT_FOUND`
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: State conflict — `CONFLICT` / `LEAD_DUPLICATE` / `LEAD_NOT_PROCESSABLE`
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ValidationFailed:
+      description: Service-level ZodError — `VALIDATION_FAILED` (422)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    PayloadTooLarge:
+      description: Body/upload over limit — `PAYLOAD_TOO_LARGE` / `IMPORT_TOO_LARGE` (413)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: Too many requests — `RATE_LIMITED` (429)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ServiceUnavailable:
+      description: Redis/BullMQ unavailable for the required operation — `QUEUE_UNAVAILABLE` (503)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ServerError:
+      description: Unexpected error — `INTERNAL_ERROR` (500); stack traces are never returned
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    # ------------------------------ envelope ------------------------------
+    Success:
+      type: object
+      required: [success, data]
+      description: Success envelope. `data` is endpoint-specific and `null` when the handler returns nothing.
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          description: Endpoint-specific payload (see each operation's allOf wrapper).
+    Error:
+      type: object
+      required: [success, error]
+      properties:
+        success: { type: boolean, enum: [false] }
+        error: { $ref: "#/components/schemas/ErrorBody" }
+    ErrorBody:
+      type: object
+      required: [code, message, requestId]
+      properties:
+        code:
+          type: string
+          description: |
+            Stable machine code, e.g. BAD_REQUEST, VALIDATION_FAILED, UNAUTHENTICATED,
+            TOKEN_EXPIRED, FORBIDDEN, NOT_FOUND, CONFLICT, IDEMPOTENCY_CONFLICT,
+            RATE_LIMITED, PAYLOAD_TOO_LARGE, INTERNAL_ERROR, SERVICE_UNAVAILABLE,
+            WEBHOOK_SIGNATURE_INVALID, WEBHOOK_UNKNOWN_SOURCE, WEBHOOK_PAYLOAD_INVALID,
+            LEAD_DUPLICATE, LEAD_NOT_PROCESSABLE, DESTINATION_*, DELIVERY_DEAD,
+            IMPORT_FILE_INVALID, IMPORT_TOO_LARGE, QUEUE_UNAVAILABLE, DATABASE_ERROR.
+        message: { type: string }
+        requestId: { type: string, description: 'Correlation id, also echoed in the x-correlation-id header' }
+        details:
+          description: Optional field-level issues (path/message rows)
+    # ------------------------------ auth ---------------------------------
+    SessionUser:
+      type: object
+      required: [id, email, name, role, permissions, tenantId, tenantName, tenantSlug]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        name: { type: string }
+        role: { type: string, description: Role name }
+        permissions:
+          type: array
+          items: { type: string }
+        tenantId: { type: string }
+        tenantName: { type: string }
+        tenantSlug: { type: string }
+    AuthSession:
+      type: object
+      required: [accessToken, refreshToken, refreshExpiresAt, user]
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string, description: Also set as httpOnly cookie (path /api/v1/auth) — finding H-9 notes the body copy }
+        refreshExpiresAt: { type: string, format: date-time }
+        user: { $ref: "#/components/schemas/SessionUser" }
+    MeResult:
+      type: object
+      required: [user, tenant]
+      properties:
+        user:
+          type: object
+          required: [id, email, role, permissions, actorType]
+          properties:
+            id: { type: string }
+            email: { type: string, format: email }
+            role: { type: string }
+            permissions: { type: array, items: { type: string } }
+            actorType: { type: string, enum: [USER, API_KEY, SYSTEM, WORKER] }
+            name: { type: string }
+        tenant:
+          type: object
+          required: [id, name, slug]
+          properties:
+            id: { type: string }
+            name: { type: string }
+            slug: { type: string }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        password: { type: string, minLength: 1, maxLength: 128 }
+        slug:
+          type: string
+          description: Workspace slug — required when the email exists in 2+ tenants
+          pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+          minLength: 2
+          maxLength: 48
+    RegisterRequest:
+      type: object
+      required: [tenantName, slug, name, email, password]
+      properties:
+        tenantName: { type: string, minLength: 2, maxLength: 120 }
+        slug: { type: string, pattern: "^[a-z0-9]+(-[a-z0-9]+)*$", minLength: 2, maxLength: 48 }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        email: { type: string, format: email, maxLength: 254 }
+        password:
+          type: string
+          minLength: 12
+          maxLength: 128
+          description: ≥12 chars with lowercase, uppercase and a digit (mirrors passwordSchema)
+    RefreshRequest:
+      type: object
+      properties:
+        refreshToken:
+          type: string
+          minLength: 32
+          maxLength: 512
+          description: Optional when the httpOnly refresh cookie is present
+    # ------------------------------ tenants ------------------------------
+    TenantSummary:
+      type: object
+      required: [id, name, slug]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        status: { type: string, description: TenantStatus (ACTIVE/SUSPENDED…) }
+        createdAt: { type: string, format: date-time }
+    TenantUpdateRequest:
+      type: object
+      properties:
+        name: { type: string, minLength: 2, maxLength: 120 }
+        settings:
+          type: object
+          additionalProperties: true
+          description: Accepted by the schema but currently not applied by the service (uses `name` only)
+    # ------------------------------ users --------------------------------
+    UserListItem:
+      type: object
+      required: [id, email, status, createdAt, role]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        name: { type: string, nullable: true }
+        status: { type: string, enum: [ACTIVE, INVITED, DISABLED] }
+        lastLoginAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        role:
+          type: object
+          required: [id, name]
+          properties:
+            id: { type: string }
+            name: { type: string }
+    UserListData:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/UserListItem" } }
+        nextCursor: { type: string, nullable: true }
+    UserCreateRequest:
+      type: object
+      required: [email, name, password, roleId]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        password: { type: string, minLength: 12, maxLength: 128 }
+        roleId: { type: string, maxLength: 64 }
+    UserUpdateRequest:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        roleId: { type: string, maxLength: 64 }
+        status: { type: string, enum: [ACTIVE, INVITED, DISABLED] }
+    # ------------------------------ roles --------------------------------
+    RoleListItem:
+      type: object
+      required: [id, name, permissions, isSystem, createdAt, userCount]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        permissions: { type: array, items: { type: string } }
+        isSystem: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        userCount: { type: integer }
+    RoleUpsertRequest:
+      type: object
+      required: [name, permissions]
+      properties:
+        name: { type: string, pattern: "^[a-z0-9]+(-[a-z0-9]+)*$", minLength: 2, maxLength: 48 }
+        description: { type: string, maxLength: 500 }
+        permissions:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: { type: string, minLength: 1, maxLength: 64 }
+          description: Catalog codes only (no wildcard)
+    PermissionCatalog:
+      type: object
+      required: [items, templates]
+      properties:
+        items: { type: array, items: { type: string }, description: All 34 permission codes }
+        templates:
+          type: object
+          description: System role templates (admin/manager/developer/viewer)
+          additionalProperties:
+            type: object
+            properties:
+              description: { type: string }
+              permissions: { type: array, items: { type: string } }
+    DeletedAck:
+      type: object
+      required: [deleted]
+      properties:
+        deleted: { type: boolean, enum: [true] }
+    RevokedAck:
+      type: object
+      required: [revoked]
+      properties:
+        revoked: { type: boolean, enum: [true] }
+    # ------------------------------ api keys -----------------------------
+    ApiKeyListItem:
+      type: object
+      required: [id, name, keyPrefix, status, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        keyPrefix: { type: string }
+        status: { type: string, enum: [ACTIVE, REVOKED, EXPIRED] }
+        scopes: { type: array, items: { type: string } }
+        lastUsedAt: { type: string, format: date-time, nullable: true }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        revokedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+    ApiKeyCreated:
+      allOf:
+        - $ref: "#/components/schemas/ApiKeyListItem"
+        - type: object
+          required: [apiKey]
+          properties:
+            apiKey:
+              type: string
+              description: RAW key — the only time it is ever returned
+    ApiKeyCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        scopes:
+          type: array
+          maxItems: 50
+          items: { type: string, minLength: 1, maxLength: 64 }
+          default: []
+          description: 'Empty (default) ⇒ guard grants wildcard `*` — finding H-2'
+        expiresInDays: { type: integer, minimum: 1, maximum: 3650 }
+    ApiKeyListData:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ApiKeyListItem" } }
+        nextCursor: { type: string, nullable: true }
+    # ------------------------------ audit --------------------------------
+    AuditLogItem:
+      type: object
+      required: [id, actorType, action, entityType, createdAt]
+      properties:
+        id: { type: string }
+        actorType: { type: string, enum: [USER, API_KEY, SYSTEM, WORKER] }
+        actorId: { type: string, nullable: true }
+        actorLabel: { type: string, nullable: true, description: Email or key name }
+        action: { type: string, description: "e.g. lead.replayed, delivery.replayed, user.updated, auth.login.failed" }
+        entityType: { type: string }
+        entityId: { type: string, nullable: true }
+        ip: { type: string, nullable: true }
+        correlationId: { type: string, nullable: true }
+        before: { description: Sanitized before-state (secrets stripped) }
+        after: { description: Sanitized after-state (secrets stripped) }
+        metadata: { description: Sanitized metadata (secret keys removed) }
+        createdAt: { type: string, format: date-time }
+    AuditLogListData:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AuditLogItem" } }
+        nextCursor: { type: string, nullable: true }
+    # ------------------------------ leads --------------------------------
+    LeadCanonicalData:
+      type: object
+      properties:
+        name:
+          type: object
+          properties:
+            first: { type: string }
+            last: { type: string }
+            full: { type: string }
+        email: { type: string }
+        phone: { type: string }
+        location:
+          type: object
+          properties:
+            city: { type: string }
+            state: { type: string }
+            country: { type: string }
+        budget: { type: number }
+        currency: { type: string }
+        project: { type: string }
+        custom: { type: object, additionalProperties: true }
+    LeadListItem:
+      type: object
+      required: [id, status, stage, source, canonicalData, receivedAt, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        externalLeadId: { type: string, nullable: true }
+        status: { type: string, enum: [RECEIVED, PROCESSING, PROCESSED, REJECTED, FAILED] }
+        stage:
+          type: string
+          enum: [RECEIVED, VALIDATION, NORMALIZATION, DEDUPLICATION, ENRICHMENT, SCORING, ROUTING, MAPPING, QUEUED, DELIVERY, COMPLETED, FAILED]
+        score: { type: integer, nullable: true }
+        scoreVersion: { type: string, nullable: true }
+        source:
+          type: object
+          required: [id, type, name]
+          properties:
+            id: { type: string }
+            type: { type: string }
+            name: { type: string }
+        canonicalData: { $ref: "#/components/schemas/LeadCanonicalData" }
+        receivedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        correlationId: { type: string, nullable: true }
+    LeadListData:
+      type: object
+      required: [items, nextCursor, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/LeadListItem" } }
+        nextCursor: { type: string, nullable: true }
+        total: { type: integer }
+    LeadCreateRequest:
+      type: object
+      required: [sourceId, sourceAccountId, data]
+      properties:
+        sourceId: { type: string, maxLength: 64 }
+        sourceAccountId: { type: string, maxLength: 64 }
+        externalLeadId:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Optional but strongly recommended — enables 409 dedup on retries (finding H-5)
+        data: { type: object, additionalProperties: true }
+    LeadProcessing:
+      type: object
+      description: 1:1 processing record (validation/normalization/dedup/enrichment/routing results)
+      properties:
+        validationStatus: { type: string, enum: [PENDING, PASSED, FAILED] }
+        deduplicationStatus: { type: string, enum: [PENDING, UNIQUE, DUPLICATE, DISABLED] }
+        validationResult: {}
+        normalizationResult: {}
+        deduplicationResult: {}
+        enrichmentResult: {}
+        routingResult: {}
+        correlationId: { type: string, nullable: true }
+        startedAt: { type: string, format: date-time, nullable: true }
+        finishedAt: { type: string, format: date-time, nullable: true }
+        error: { type: string, nullable: true }
+    LeadScore:
+      type: object
+      required: [id, score, version, computedAt]
+      properties:
+        id: { type: string }
+        score: { type: integer }
+        version: { type: string, description: Scoring rule-set version }
+        breakdown: { description: Rule-by-rule breakdown (JSON) }
+        computedAt: { type: string, format: date-time }
+    LeadDuplicateLink:
+      type: object
+      properties:
+        originalLeadId: { type: string }
+        strategy: { type: string, enum: [EXTERNAL_ID, PHONE, EMAIL, PHONE_EMAIL, CUSTOM] }
+        confidence: { type: number, nullable: true }
+    StageEvent:
+      type: object
+      required: [id, stage, status]
+      properties:
+        id: { type: string }
+        stage: { type: string }
+        status: { type: string, enum: [PENDING, RUNNING, PASSED, FAILED, SKIPPED] }
+        startedAt: { type: string, format: date-time, nullable: true }
+        finishedAt: { type: string, format: date-time, nullable: true }
+        durationMs: { type: integer, nullable: true }
+        detail: {}
+        error: { type: string, nullable: true }
+    RoutingResult:
+      type: object
+      required: [id, matched, evaluatedAt]
+      properties:
+        id: { type: string }
+        ruleId: { type: string, nullable: true }
+        ruleName: { type: string, nullable: true }
+        destinationIds: { type: array, items: { type: string } }
+        matched: { type: boolean }
+        reason: { type: string, nullable: true }
+        evaluatedAt: { type: string, format: date-time }
+    TimelineData:
+      type: object
+      required: [stageEvents, scores, routingResults]
+      properties:
+        stageEvents: { type: array, items: { $ref: "#/components/schemas/StageEvent" } }
+        scores: { type: array, items: { $ref: "#/components/schemas/LeadScore" } }
+        routingResults: { type: array, items: { $ref: "#/components/schemas/RoutingResult" } }
+    RawPayload:
+      type: object
+      required: [id, payload, receivedAt]
+      properties:
+        id: { type: string }
+        payload: { description: Original inbound payload as stored }
+        headers: { type: object, additionalProperties: true, nullable: true }
+        checksum: { type: string, nullable: true }
+        receivedAt: { type: string, format: date-time }
+    LeadPayloadsData:
+      type: object
+      required: [canonical, payloads]
+      properties:
+        canonical: { $ref: "#/components/schemas/LeadCanonicalData" }
+        normalized: { description: Normalized snapshot (JSON) }
+        payloads: { type: array, items: { $ref: "#/components/schemas/RawPayload" } }
+    DeliveryAttempt:
+      type: object
+      required: [id, attemptNumber, status]
+      properties:
+        id: { type: string }
+        attemptNumber: { type: integer, description: 'Global, append-only numbering across replay cycles' }
+        status: { type: string, enum: [SUCCEEDED, FAILED, TIMEOUT, RATE_LIMITED, NOT_CONFIGURED, REJECTED] }
+        responseStatus: { type: integer, nullable: true }
+        responseBody: { type: string, nullable: true, description: 'Truncated (≤2 KB), sanitized' }
+        errorCode: { type: string, nullable: true }
+        errorCategory: { type: string, nullable: true }
+        durationMs: { type: integer, nullable: true }
+        externalId: { type: string, nullable: true }
+        startedAt: { type: string, format: date-time, nullable: true }
+        finishedAt: { type: string, format: date-time, nullable: true }
+        replayCycle: { type: integer, description: 0 = original run; +1 per replay (phase 2) }
+        replayCycleAttempt: { type: integer, description: 1-based attempt index within its cycle }
+    LeadDelivery:
+      type: object
+      required: [id, status, attemptCount, maxAttempts, createdAt, updatedAt, destination]
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [PENDING, QUEUED, IN_PROGRESS, SUCCEEDED, FAILED, DEAD, SKIPPED] }
+        attemptCount: { type: integer }
+        maxAttempts: { type: integer }
+        externalId: { type: string, nullable: true }
+        errorCode: { type: string, nullable: true }
+        errorMessage: { type: string, nullable: true }
+        mappedPayload: { description: Last mapped request body (JSON) }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        destination:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+            type: { type: string }
+        attempts:
+          type: array
+          description: 'Most recent 3 attempts only (detail include `take: 3`)'
+          items: { $ref: "#/components/schemas/DeliveryAttempt" }
+    LeadDetail:
+      allOf:
+        - $ref: "#/components/schemas/LeadListItem"
+        - type: object
+          properties:
+            sourceAccount:
+              type: object
+              nullable: true
+              properties:
+                id: { type: string }
+                name: { type: string }
+                publicId: { type: string }
+            normalizedData: { description: Normalized snapshot (JSON) }
+            processing: { $ref: "#/components/schemas/LeadProcessing" }
+            scores: { type: array, items: { $ref: "#/components/schemas/LeadScore" } }
+            duplicateOf:
+              oneOf:
+                - $ref: "#/components/schemas/LeadDuplicateLink"
+                - type: "null"
+            deliveries: { type: array, items: { $ref: "#/components/schemas/LeadDelivery" } }
+    ReplayedAck:
+      type: object
+      required: [replayed]
+      properties:
+        replayed: { type: boolean, enum: [true] }
+    # ------------------------------ sources ------------------------------
+    SourceItem:
+      type: object
+      required: [id, type, code, name, createdAt]
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        type: { type: string, enum: [GOOGLE_ADS, META_ADS, WEBSITE, LINKEDIN, API, WEBHOOK, CSV, CUSTOM] }
+        code: { type: string, description: Tenant-unique lowercase-kebab }
+        name: { type: string }
+        config: { type: object, additionalProperties: true }
+        createdAt: { type: string, format: date-time }
+        _count:
+          type: object
+          properties:
+            accounts: { type: integer }
+            leads: { type: integer }
+    SourceDetail:
+      allOf:
+        - $ref: "#/components/schemas/SourceItem"
+        - type: object
+          properties:
+            accounts:
+              type: array
+              items: { $ref: "#/components/schemas/SourceAccount" }
+    SourceCreateRequest:
+      type: object
+      required: [type, code, name]
+      properties:
+        type: { type: string, enum: [GOOGLE_ADS, META_ADS, WEBSITE, LINKEDIN, API, WEBHOOK, CSV, CUSTOM] }
+        code: { type: string, pattern: "^[a-z0-9]+(-[a-z0-9]+)*$", minLength: 2, maxLength: 48 }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        config: { type: object, additionalProperties: true, default: {} }
+    SourceUpdateRequest:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        config: { type: object, additionalProperties: true }
+    SourceAccount:
+      type: object
+      required: [id, name, publicId, webhookUrl, createdAt]
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        sourceId: { type: string }
+        name: { type: string }
+        publicId: { type: string, description: Unguessable id used in the inbound URL }
+        config: { type: object, additionalProperties: true }
+        webhookUrl: { type: string, format: uri, description: Server-computed POST target }
+        createdAt: { type: string, format: date-time }
+        signingSecret:
+          type: string
+          description: Present exactly once — on create (webhook-bearing types) or rotation
+    AccountCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        config: { type: object, additionalProperties: true, default: {} }
+    AccountUpdateRequest:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        config: { type: object, additionalProperties: true }
+    SigningSecretAck:
+      type: object
+      required: [signingSecret]
+      properties:
+        signingSecret: { type: string, description: New HMAC secret — shown only now }
+    # ------------------------------ webhooks -----------------------------
+    WebhookAck:
+      type: object
+      required: [received, duplicate, eventId]
+      properties:
+        received: { type: boolean, enum: [true] }
+        duplicate: { type: boolean, description: 'true → already known, original lead resumed' }
+        eventId: { type: string }
+        leadId: { type: string, nullable: true }
+    WebhookEventListItem:
+      type: object
+      required: [id, sourceAccountId, status, receivedAt]
+      properties:
+        id: { type: string }
+        sourceAccountId: { type: string }
+        externalEventId: { type: string, nullable: true }
+        status: { type: string, enum: [RECEIVED, PROCESSED, FAILED, DUPLICATE] }
+        leadId: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+        receivedAt: { type: string, format: date-time }
+        processedAt: { type: string, format: date-time, nullable: true }
+    WebhookEventListData:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/WebhookEventListItem" } }
+        nextCursor: { type: string, nullable: true }
+    WebhookEventDetail:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEventListItem"
+        - type: object
+          properties:
+            payload: { description: Sanitized (secret-stripped) stored payload }
+            headers: { type: object, additionalProperties: true, description: Sanitized headers }
+    # ---------------------------- destinations ---------------------------
+    DestinationTypeInfo:
+      type: object
+      required: [type, requiredConfigKeys]
+      properties:
+        type: { type: string, enum: [SALESFORCE, ZOHO, DCT_CRM, HUBSPOT, PIPEDRIVE, CUSTOM_API, WEBHOOK] }
+        requiredConfigKeys: { type: array, items: { type: string } }
+    DestinationItem:
+      type: object
+      required: [id, type, name, status, createdAt]
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        type: { type: string, enum: [SALESFORCE, ZOHO, DCT_CRM, HUBSPOT, PIPEDRIVE, CUSTOM_API, WEBHOOK] }
+        name: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        config: { type: object, additionalProperties: true }
+        rateLimitPerSec: { type: integer, nullable: true }
+        createdAt: { type: string, format: date-time }
+        health: { $ref: "#/components/schemas/DestinationHealth" }
+        _count:
+          type: object
+          properties:
+            deliveries: { type: integer }
+            fieldMappings: { type: integer }
+    DestinationCreateRequest:
+      type: object
+      required: [type, name]
+      properties:
+        type: { type: string, enum: [SALESFORCE, ZOHO, DCT_CRM, HUBSPOT, PIPEDRIVE, CUSTOM_API, WEBHOOK] }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        config: { type: object, additionalProperties: true, default: {} }
+        rateLimitPerSec: { type: integer, minimum: 1, maximum: 1000 }
+    DestinationUpdateRequest:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        status: { type: string, enum: [ACTIVE, DISABLED], description: activate/deactivate }
+        config: { type: object, additionalProperties: true }
+        rateLimitPerSec: { type: integer, minimum: 1, maximum: 1000, nullable: true }
+    DestinationHealth:
+      type: object
+      properties:
+        status: { type: string, description: ConnectionStatus (NOT_CONFIGURED/CONNECTED/DISCONNECTED/ERROR) }
+        lastSuccessAt: { type: string, format: date-time, nullable: true }
+        lastFailureAt: { type: string, format: date-time, nullable: true }
+        lastError: { type: string, nullable: true }
+        lastLatencyMs: { type: integer, nullable: true }
+        checkedAt: { type: string, format: date-time, nullable: true }
+    CredentialSetRequest:
+      type: object
+      required: [type, secret]
+      properties:
+        type: { type: string, enum: [WEBHOOK_HMAC, API_KEY, BASIC, OAUTH, BEARER] }
+        secret: { type: string, minLength: 1, maxLength: 8192, description: Write-only; AES-256-GCM at rest }
+        meta: { type: object, additionalProperties: true, default: {} }
+    StoredAck:
+      type: object
+      required: [stored, type]
+      properties:
+        stored: { type: boolean, enum: [true] }
+        type: { type: string }
+    RemovedAck:
+      type: object
+      required: [removed]
+      properties:
+        removed: { type: boolean, enum: [true] }
+    DestinationTestResult:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
+        status: { description: 'HTTP status of the probe, number or adapter string' }
+        latencyMs: { type: integer, nullable: true }
+        error: { type: string, nullable: true }
+        detail: { type: string, nullable: true }
+    # -------------------------- field mappings ---------------------------
+    FieldMappingField:
+      type: object
+      required: [source, target]
+      properties:
+        source: { type: string, minLength: 1, maxLength: 200 }
+        target: { type: string, minLength: 1, maxLength: 200 }
+        required: { type: boolean }
+        defaultValue: { description: string | number | boolean }
+        transforms:
+          type: array
+          maxItems: 10
+          description: >
+            Transform chain: uppercase, lowercase, trim, template, coerce_number,
+            coerce_string, coerce_boolean, slice, replace, default_if_empty,
+            prefix, suffix, phone_e164
+          items: { type: object, additionalProperties: true }
+    FieldMappingVersion:
+      type: object
+      required: [id, version, fields, createdAt]
+      properties:
+        id: { type: string }
+        version: { type: integer }
+        fields: { type: array, items: { $ref: "#/components/schemas/FieldMappingField" } }
+        notes: { type: string, nullable: true }
+        createdBy: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+    FieldMappingListItem:
+      type: object
+      required: [id, name, destinationId, status, versionCount, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        destinationId: { type: string }
+        status: { type: string, enum: [DRAFT, ACTIVE, ARCHIVED] }
+        activeVersionId: { type: string, nullable: true }
+        versionCount: { type: integer }
+        destination:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+            type: { type: string }
+        updatedAt: { type: string, format: date-time }
+    FieldMappingListData:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/FieldMappingListItem" } }
+        nextCursor: { type: string, nullable: true }
+    FieldMappingDetail:
+      allOf:
+        - $ref: "#/components/schemas/FieldMappingListItem"
+        - type: object
+          properties:
+            versions: { type: array, items: { $ref: "#/components/schemas/FieldMappingVersion" } }
+    FieldMappingCreateRequest:
+      type: object
+      required: [destinationId, name, fields]
+      properties:
+        destinationId: { type: string, maxLength: 64 }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        fields:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: { $ref: "#/components/schemas/FieldMappingField" }
+        notes: { type: string, maxLength: 2000 }
+        activate: { type: boolean, default: false }
+    FieldMappingVersionRequest:
+      type: object
+      required: [fields]
+      properties:
+        fields:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: { $ref: "#/components/schemas/FieldMappingField" }
+        notes: { type: string, maxLength: 2000 }
+        activate: { type: boolean, default: false }
+    FieldMappingActivateRequest:
+      type: object
+      required: [version]
+      properties:
+        version: { type: integer, minimum: 1 }
+    # ---------------------------- routing rules --------------------------
+    RuleCondition:
+      type: object
+      required: [field, operator]
+      properties:
+        field: { type: string, minLength: 1, maxLength: 120, description: 'Dotted path, e.g. "canonical.city", "score", "source.type"' }
+        operator:
+          type: string
+          enum: [EQ, NEQ, CONTAINS, NOT_CONTAINS, STARTS_WITH, ENDS_WITH, GT, GTE, LT, LTE, IN, NOT_IN, EXISTS, NOT_EXISTS]
+        value: { description: string (≤500) | number | boolean | array of string|number (≤50) }
+    RoutingRule:
+      type: object
+      required: [id, name, enabled, priority, stopOnMatch, conditions, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        enabled: { type: boolean }
+        priority: { type: integer, description: Lower evaluates first }
+        stopOnMatch: { type: boolean }
+        conditions: { type: array, items: { $ref: "#/components/schemas/RuleCondition" } }
+        version: { type: integer }
+        updatedAt: { type: string, format: date-time }
+        destinations:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              name: { type: string }
+              type: { type: string }
+              order: { type: integer }
+    RoutingRuleUpsertRequest:
+      type: object
+      required: [name, conditions, destinationIds]
+      description: Full body on create; any subset on PATCH (merge-patch).
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        description: { type: string, maxLength: 1000 }
+        enabled: { type: boolean, default: true }
+        priority: { type: integer, minimum: 1, maximum: 10000, default: 100 }
+        stopOnMatch: { type: boolean, default: true }
+        conditions:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items: { $ref: "#/components/schemas/RuleCondition" }
+        destinationIds:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items: { type: string, maxLength: 64 }
+    # ----------------------------- automation ----------------------------
+    ScoringRule:
+      type: object
+      required: [id, label, condition, points]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 64 }
+        label: { type: string, minLength: 1, maxLength: 200 }
+        condition: { $ref: "#/components/schemas/RuleCondition" }
+        points: { type: integer, minimum: -1000, maximum: 1000 }
+    ScoringRuleSet:
+      type: object
+      required: [id, name, version, enabled, rules, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        version: { type: string, description: Immutable label like "v1" }
+        enabled: { type: boolean, description: Exactly one set enabled per tenant }
+        rules: { type: array, items: { $ref: "#/components/schemas/ScoringRule" } }
+        activatedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+    ScoringRuleSetUpsertRequest:
+      type: object
+      required: [name, rules]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        enabled: { type: boolean, default: false }
+        rules:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { $ref: "#/components/schemas/ScoringRule" }
+    EnabledPatch:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+    DedupConfig:
+      type: object
+      required: [enabled, strategy, matchFields]
+      properties:
+        id: { type: string }
+        enabled: { type: boolean }
+        strategy: { type: string, enum: [EXTERNAL_ID, PHONE, EMAIL, PHONE_EMAIL, CUSTOM] }
+        matchFields: { type: array, items: { type: string }, maxItems: 10 }
+        updatedAt: { type: string, format: date-time }
+    DedupConfigRequest:
+      type: object
+      required: [enabled, strategy]
+      properties:
+        enabled: { type: boolean }
+        strategy: { type: string, enum: [EXTERNAL_ID, PHONE, EMAIL, PHONE_EMAIL, CUSTOM] }
+        matchFields: { type: array, items: { type: string }, maxItems: 10, default: [] }
+    EnrichmentStatus:
+      type: object
+      required: [implemented, providers]
+      properties:
+        implemented: { type: boolean, enum: [false] }
+        providers: { type: array, items: { type: string }, description: Always empty today }
+        note: { type: string, description: Honest explanation that the stage records SKIPPED }
+    # ----------------------------- deliveries ----------------------------
+    QueueStats:
+      type: object
+      required: [queues, deadLetters]
+      properties:
+        queues:
+          type: object
+          description: Queue name → BullMQ counts (waiting/active/completed/failed/delayed…) or {error}
+          additionalProperties:
+            type: object
+            additionalProperties: true
+            description: 'BullMQ counts (waiting/active/completed/failed/delayed…) or an {error} object'
+        deadLetters:
+          type: object
+          description: '<queue>-dlq → counts or {error}'
+          additionalProperties: { type: object, additionalProperties: true }
+    QueueJob:
+      type: object
+      required: [id, data]
+      description: >
+        Raw BullMQ job view — **GLOBAL across all tenants** (finding H-1).
+        One-shot failure shape: a single object containing only {error}.
+      properties:
+        id: { type: string }
+        name: { type: string, description: Job name }
+        queue: { type: string, description: Queue name (DLQ views append -dlq) }
+        data: { type: object, additionalProperties: true, description: Includes tenantId/leadId/payload — the H-1 leak }
+        failedReason: { type: string, nullable: true }
+        attemptsMade: { type: integer }
+        createdAt: { type: string, format: date-time, nullable: true, description: Dead-letter view (job.timestamp) }
+        processedOn: { type: string, format: date-time, nullable: true }
+        retryAt: { type: string, format: date-time, nullable: true, description: 'Failed view — currently job creation time, not next retry (frontend mismatch I-3)' }
+        error: { type: string, description: Present instead of job rows when Redis is unavailable }
+    DeliveryListItem:
+      type: object
+      required: [id, leadId, destination, status, attemptCount, maxAttempts, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        leadId: { type: string }
+        lead:
+          type: object
+          nullable: true
+          properties:
+            id: { type: string }
+            receivedAt: { type: string, format: date-time, nullable: true }
+        destination:
+          type: object
+          required: [id, name, type]
+          properties:
+            id: { type: string }
+            name: { type: string }
+            type: { type: string }
+        status: { type: string, enum: [PENDING, QUEUED, IN_PROGRESS, SUCCEEDED, FAILED, DEAD, SKIPPED] }
+        attemptCount: { type: integer }
+        maxAttempts: { type: integer }
+        replayCount: { type: integer, description: Times this delivery has been replayed (phase 2) }
+        cycleStartAttempt: { type: integer, description: Global attempt number where the current cycle began }
+        externalId: { type: string, nullable: true }
+        errorCode: { type: string, nullable: true }
+        errorMessage: { type: string, nullable: true }
+        correlationId: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        _count:
+          type: object
+          properties:
+            attempts: { type: integer }
+    DeliveryListData:
+      type: object
+      required: [items, nextCursor, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/DeliveryListItem" } }
+        nextCursor: { type: string, nullable: true }
+        total: { type: integer }
+    DeliveryDetail:
+      allOf:
+        - $ref: "#/components/schemas/DeliveryListItem"
+        - type: object
+          properties:
+            attempts:
+              type: array
+              description: Full attempt history, newest first (immutable)
+              items: { $ref: "#/components/schemas/DeliveryAttempt" }
+    QueuedAck:
+      type: object
+      required: [queued]
+      properties:
+        queued: { type: boolean, enum: [true] }
+    # ------------------------------ imports ------------------------------
+    ImportJob:
+      type: object
+      required: [id, fileName, fileSizeBytes, status, createdAt]
+      description: Safe list/detail select for job rows.
+      properties:
+        id: { type: string }
+        fileName: { type: string }
+        fileSizeBytes: { type: integer }
+        status: { type: string, enum: [PENDING, PARSING, PROCESSING, COMPLETED, FAILED, CANCELLED] }
+        totalRows: { type: integer, nullable: true }
+        processedRows: { type: integer }
+        successfulRows: { type: integer }
+        failedRows: { type: integer }
+        duplicateRows: { type: integer }
+        createdAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time, nullable: true }
+        error: { type: string, nullable: true }
+    ImportListData:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ImportJob" } }
+        nextCursor: { type: string, nullable: true }
+    ImportJobDetail:
+      allOf:
+        - $ref: "#/components/schemas/ImportJob"
+        - type: object
+          properties:
+            storageKey:
+              type: string
+              description: Internal object-storage key — leaked by detail but excluded from list (finding H-9)
+            checksum: { type: string, description: SHA-256 of the uploaded file (finding H-9) }
+            sourceId: { type: string, nullable: true }
+    # ----------------------------- analytics -----------------------------
+    AnalyticsOverview:
+      type: object
+      required: [leads, deliveries, inbound, generatedAt]
+      properties:
+        leads:
+          type: object
+          properties:
+            total24h: { type: integer }
+            total7d: { type: integer }
+            total30d: { type: integer }
+            byStatus: { type: object, additionalProperties: { type: integer } }
+        deliveries:
+          type: object
+          properties:
+            total: { type: integer }
+            succeeded: { type: integer }
+            failedOrDead: { type: integer }
+            successRate: { type: number, nullable: true }
+            avgAttemptsOnSuccess: { type: number, nullable: true }
+            byStatus: { type: object, additionalProperties: { type: integer } }
+        inbound:
+          type: object
+          properties:
+            webhookEvents24h: { type: integer }
+        topSources: { type: array, items: { type: object, additionalProperties: true } }
+        topDestinations: { type: array, items: { type: object, additionalProperties: true } }
+        generatedAt: { type: string, format: date-time }
+    TimeseriesData:
+      type: object
+      required: [days, leads, deliveries]
+      properties:
+        days: { type: integer }
+        leads:
+          type: array
+          items:
+            type: object
+            properties:
+              date: { type: string }
+              count: { type: integer }
+        deliveries:
+          type: array
+          items:
+            type: object
+            properties:
+              date: { type: string }
+              count: { type: integer }
+    SourcePerformanceRow:
+      type: object
+      required: [source, total, byStatus]
+      properties:
+        source:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+            code: { type: string }
+            type: { type: string }
+        total: { type: integer }
+        byStatus: { type: object, additionalProperties: { type: integer } }
+    DestinationPerformanceRow:
+      type: object
+      required: [destination, total, succeeded, byStatus]
+      properties:
+        destination:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+            type: { type: string }
+            status: { type: string }
+        total: { type: integer }
+        succeeded: { type: integer }
+        byStatus: { type: object, additionalProperties: { type: integer } }
+        successRate: { type: number, nullable: true }
+        avgLatencyMs: { type: number, nullable: true }
+    PipelineFunnel:
+      type: object
+      required: [total, stages]
+      properties:
+        total: { type: integer }
+        stages:
+          type: array
+          items:
+            type: object
+            required: [stage, count, share]
+            properties:
+              stage: { type: string }
+              count: { type: integer }
+              share: { type: number }
+    # ------------------------------- health ------------------------------
+    HealthReport:
+      type: object
+      required: [status, checks, version, uptimeSec]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        checks:
+          type: object
+          properties:
+            database:
+              type: object
+              properties:
+                ok: { type: boolean }
+                latencyMs: { type: integer }
+                error: { type: string, description: Raw driver error (finding H-10) }
+            redis:
+              type: object
+              properties:
+                ok: { type: boolean }
+                latencyMs: { type: integer }
+                error: { type: string }
+        version: { type: string }
+        uptimeSec: { type: integer }
+
