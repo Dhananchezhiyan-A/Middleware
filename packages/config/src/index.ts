@@ -115,6 +115,21 @@ const envSchema = z.object({
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional().default(""),
   SENTRY_DSN: z.string().optional().default(""),
 
+  // Routing date/time/month/day evaluation happens in THIS timezone (server
+  // side) — never in the operator's browser timezone.
+  APP_TIMEZONE: z
+    .string()
+    .optional()
+    .default("Asia/Kolkata")
+    .refine((tz) => {
+      try {
+        new Intl.DateTimeFormat("en-US", { timeZone: tz });
+        return true;
+      } catch {
+        return false;
+      }
+    }, "APP_TIMEZONE must be a valid IANA timezone, e.g. Asia/Kolkata"),
+
   // Security toggles
   // Development convenience: allow custom-API destinations on localhost.
   SSRF_ALLOW_PRIVATE_HOSTS: z.string().optional().default(""),

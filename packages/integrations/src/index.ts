@@ -10,6 +10,7 @@ import { ZohoAdapter } from "./adapters/zoho";
 export * from "./types";
 export * from "./registry";
 export * from "./mapping";
+export * from "./conditions";
 export * from "./http";
 export {
   CustomApiAdapter,

@@ -1,6 +1,6 @@
 "use client";
 
-import { MoreHorizontal, Pencil, Route, Trash2 } from "lucide-react";
+import { Copy, MoreHorizontal, Pencil, Play, Route, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,8 +23,14 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatDateTime, formatNumber } from "@/lib/format";
-import { conditionLabel, normalizeConditions } from "@/lib/rule-condition";
-import type { RoutingRule } from "@/lib/types";
+import {
+  conditionLabel,
+  constraintLabels,
+  normalizeConditions,
+  routingModeLabel,
+  ruleSourceIds,
+} from "@/lib/rule-condition";
+import type { RoutingRule, SourceItem } from "@/lib/types";
 
 export interface RoutingRulesTableProps {
   rows: RoutingRule[];
@@ -33,8 +39,12 @@ export interface RoutingRulesTableProps {
   onRetry: () => void;
   /** UX-only gating — the API enforces routing:write server-side. */
   canWrite: boolean;
+  /** Resolves `conditions.sourceId` to a human name (empty list = show ids). */
+  sources: SourceItem[];
   onToggle: (rule: RoutingRule, enabled: boolean) => void;
   onEdit: (rule: RoutingRule) => void;
+  onDuplicate: (rule: RoutingRule) => void;
+  onTest: (rule: RoutingRule) => void;
   onDelete: (rule: RoutingRule) => void;
 }
 
@@ -46,8 +56,11 @@ export function RoutingRulesTable({
   error,
   onRetry,
   canWrite,
+  sources,
   onToggle,
   onEdit,
+  onDuplicate,
+  onTest,
   onDelete,
 }: RoutingRulesTableProps) {
   if (isLoading) return <TableSkeleton rows={5} cols={7} />;
@@ -62,14 +75,22 @@ export function RoutingRulesTable({
     );
   }
 
+  const sourceName = (id?: string): string | undefined => {
+    if (!id) return undefined;
+    return sources.find((source) => source.id === id)?.name ?? id;
+  };
+
   return (
     <Table>
       <TableHeader>
         <TableRow>
           <TableHead className="w-[80px] text-right">Priority</TableHead>
           <TableHead>Rule</TableHead>
+          <TableHead>Source</TableHead>
           <TableHead>Conditions</TableHead>
           <TableHead>Destinations</TableHead>
+          <TableHead>Mode</TableHead>
+          <TableHead>Last matched</TableHead>
           <TableHead className="w-[80px] text-right">Version</TableHead>
           <TableHead className="w-[90px]">Enabled</TableHead>
           <TableHead className="w-[150px]">Updated</TableHead>
@@ -79,8 +100,12 @@ export function RoutingRulesTable({
       <TableBody>
         {rows.map((rule) => {
           const conditions = normalizeConditions(rule.conditions);
+          const constraints = constraintLabels(rule.conditions);
           const shown = conditions.slice(0, CONDITION_PREVIEW);
           const hidden = conditions.length - shown.length;
+          const { sourceId } = ruleSourceIds(rule.conditions);
+          const stop = rule.stopOnMatch;
+
           return (
             <TableRow key={rule.id}>
               <TableCell className="text-right tabular-nums font-medium">
@@ -92,14 +117,33 @@ export function RoutingRulesTable({
                   {rule.description || "—"}
                 </p>
               </TableCell>
+              <TableCell className="max-w-[160px]">
+                <div className="flex flex-wrap gap-1">
+                  {sourceId ? (
+                    <Badge variant="secondary" className="truncate">
+                      {sourceName(sourceId)}
+                    </Badge>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">Any source</span>
+                  )}
+                </div>
+              </TableCell>
               <TableCell className="max-w-[320px]">
                 <div className="flex flex-wrap gap-1">
+                  {constraints.map((label) => (
+                    <Badge key={label} variant="outline">
+                      {label}
+                    </Badge>
+                  ))}
                   {shown.map((condition, index) => (
                     <Badge key={`${rule.id}-${index}`} variant="outline" className="font-mono">
                       {conditionLabel(condition)}
                     </Badge>
                   ))}
                   {hidden > 0 ? <Badge variant="secondary">+{hidden} more</Badge> : null}
+                  {constraints.length === 0 && conditions.length === 0 ? (
+                    <span className="text-xs text-muted-foreground">Matches everything</span>
+                  ) : null}
                 </div>
               </TableCell>
               <TableCell className="max-w-[220px]">
@@ -115,8 +159,17 @@ export function RoutingRulesTable({
                   )}
                 </div>
               </TableCell>
+              <TableCell>
+                <Badge variant={stop ? "default" : "outline"} className="whitespace-nowrap">
+                  {stop ? "Stop after first" : "Match all"}
+                </Badge>
+                <span className="sr-only">{routingModeLabel(rule)}</span>
+              </TableCell>
+              <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                {rule.lastMatchedAt ? formatDateTime(rule.lastMatchedAt) : "Never"}
+              </TableCell>
               <TableCell className="text-right tabular-nums text-xs text-muted-foreground">
-                {formatNumber(rule.version)}
+                {formatNumber(rule.version ?? 0)}
               </TableCell>
               <TableCell>
                 <Switch
@@ -138,10 +191,16 @@ export function RoutingRulesTable({
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     <DropdownMenuLabel>{rule.name}</DropdownMenuLabel>
+                    <DropdownMenuItem onSelect={() => onTest(rule)}>
+                      <Play /> Test
+                    </DropdownMenuItem>
                     {canWrite ? (
                       <>
                         <DropdownMenuItem onSelect={() => onEdit(rule)}>
                           <Pencil /> Edit
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => onDuplicate(rule)}>
+                          <Copy /> Duplicate
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem

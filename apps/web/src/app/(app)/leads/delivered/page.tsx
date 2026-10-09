@@ -1,8 +1,13 @@
-"use client";
-
 import { LeadsView } from "@/components/leads/leads-view";
+import { readListFilterParams, type SearchParamsValue } from "@/lib/range";
 
-export default function DeliveredLeadsPage() {
+interface DeliveredLeadsPageProps {
+  searchParams: Promise<Record<string, SearchParamsValue>>;
+}
+
+export default async function DeliveredLeadsPage({ searchParams }: DeliveredLeadsPageProps) {
+  const initialFilters = readListFilterParams(await searchParams);
+
   return (
     <LeadsView
       title="Delivered"
@@ -10,6 +15,7 @@ export default function DeliveredLeadsPage() {
       presetStatus="PROCESSED"
       emptyTitle="No delivered leads yet"
       emptyDescription="Leads show up here once validation, deduplication, scoring, routing and delivery all succeed."
+      initialFilters={initialFilters}
     />
   );
 }

@@ -37,7 +37,15 @@ export class WebhooksController {
   @ApiOperation({ summary: "Inbound webhook event log (status, duplicates, errors)" })
   listEvents(
     @CurrentUser() actor: RequestActor,
-    @Query() query: { status?: string; sourceAccountId?: string; cursor?: string; limit?: number },
+    @Query()
+    query: {
+      status?: string;
+      sourceAccountId?: string;
+      cursor?: string;
+      limit?: number;
+      from?: string;
+      to?: string;
+    },
   ) {
     return this.webhooks.listEvents(actor, query);
   }

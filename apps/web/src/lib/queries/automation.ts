@@ -8,8 +8,10 @@ import type {
   FieldMappingDetail,
   FieldMappingListItem,
   FieldMappingVersion,
-  RuleCondition,
+  RoutingPreview,
+  RoutingPreviewInput,
   RoutingRule,
+  RoutingRuleConditions,
   ScoringRuleSet,
 } from "@/lib/types";
 
@@ -37,7 +39,8 @@ export interface RoutingRuleBody {
   enabled: boolean;
   priority: number;
   stopOnMatch: boolean;
-  conditions: RuleCondition[];
+  /** Legacy flat array or the structured source/date/time/month/day shape. */
+  conditions: RoutingRuleConditions;
   destinationIds: string[];
 }
 
@@ -84,6 +87,18 @@ export function useSetRoutingRuleEnabled() {
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
       api.patch<RoutingRule>(`/routing-rules/${id}`, { enabled }),
     onSuccess: invalidate,
+  });
+}
+
+export type RoutingPreviewBody = RoutingPreviewInput;
+
+/**
+ * POST /routing-rules/preview — dry run against a sample lead. Never touches
+ * the database: no RoutingResult, no delivery, no queue entry.
+ */
+export function usePreviewRouting() {
+  return useMutation({
+    mutationFn: (body: RoutingPreviewBody) => api.post<RoutingPreview>("/routing-rules/preview", body),
   });
 }
 

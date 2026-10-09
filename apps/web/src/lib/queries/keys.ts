@@ -20,6 +20,8 @@ export const queryKeys = {
     all: ["sources"] as const,
     list: ["sources", "list"] as const,
     accounts: (sourceId: string) => ["sources", "accounts", sourceId] as const,
+    /** GET /webhooks/events — inbound event log (drill-down from the dashboard). */
+    events: (params: unknown) => ["sources", "events", params] as const,
   },
 
   destinations: {

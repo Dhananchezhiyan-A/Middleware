@@ -1,8 +1,13 @@
-"use client";
-
 import { LeadsView } from "@/components/leads/leads-view";
+import { readListFilterParams, type SearchParamsValue } from "@/lib/range";
 
-export default function ProcessingLeadsPage() {
+interface ProcessingLeadsPageProps {
+  searchParams: Promise<Record<string, SearchParamsValue>>;
+}
+
+export default async function ProcessingLeadsPage({ searchParams }: ProcessingLeadsPageProps) {
+  const initialFilters = readListFilterParams(await searchParams);
+
   return (
     <LeadsView
       title="Processing"
@@ -10,6 +15,7 @@ export default function ProcessingLeadsPage() {
       presetStatus="PROCESSING"
       emptyTitle="Nothing is processing"
       emptyDescription="Leads appear here while they are being validated, normalized, scored and routed."
+      initialFilters={initialFilters}
     />
   );
 }

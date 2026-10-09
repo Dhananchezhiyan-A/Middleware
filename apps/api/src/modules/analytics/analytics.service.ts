@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { getPrisma } from "@middleware/database";
 import { errors } from "@middleware/shared";
+import { ROUTING_FALLBACK_TYPE } from "@middleware/types";
 
 /**
  * Dashboard analytics — EVERY number is a real aggregate over PostgreSQL.
@@ -24,6 +25,9 @@ export class AnalyticsService {
       topSources,
       topDestinations,
       webhookEvents,
+      routingMatched,
+      routingUnmatched,
+      routingFallback,
     ] = await Promise.all([
       prisma.lead.groupBy({ by: ["status"], _count: { _all: true } }),
       prisma.lead.count({ where: { createdAt: { gte: day(1) } } }),
@@ -50,6 +54,24 @@ export class AnalyticsService {
         take: 5,
       }),
       prisma.webhookEvent.count({ where: { receivedAt: { gte: day(1) } } }),
+      // Routing decisions (RoutingResult rows written by the ROUTING stage).
+      prisma.routingResult.count({ where: { matched: true } }),
+      prisma.routingResult.count({ where: { matched: false } }),
+      // Leads kept inside Middleware (INTERNAL_MIDDLEWARE fallback), recognised
+      // by the marker in RoutingResult.reason. Covers BOTH "no rule matched"
+      // and "rule matched but no usable destination" — neither case created a
+      // delivery, so these leads are never counted as delivery success/failure.
+      // The exact legacy wording is included for rows written before the marker
+      // existed: those carry an empty destinationIds list and no Delivery row,
+      // i.e. the same "kept in Middleware" outcome.
+      prisma.routingResult.count({
+        where: {
+          OR: [
+            { reason: { contains: ROUTING_FALLBACK_TYPE } },
+            { reason: "no routing rule matched" },
+          ],
+        },
+      }),
     ]);
 
     const succeeded = deliverySucceeded;
@@ -93,6 +115,11 @@ export class AnalyticsService {
         byStatus: Object.fromEntries(deliveriesByStatus.map((r) => [r.status, r._count._all])),
       },
       inbound: { webhookEvents24h: webhookEvents },
+      routing: {
+        matchedRules: routingMatched,
+        unmatchedLeads: routingUnmatched,
+        fallbackLeads: routingFallback,
+      },
       topSources: topSources.map((s) => ({
         ...s,
         source: sources.find((x) => x.id === s.sourceId) ?? null,

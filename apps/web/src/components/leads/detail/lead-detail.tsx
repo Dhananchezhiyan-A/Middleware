@@ -91,7 +91,7 @@ export function LeadDetail({ id }: { id: string }) {
           <LeadDuplicates lead={lead} />
         </TabsContent>
         <TabsContent value="routing">
-          <LeadRouting results={lead.routingResults} />
+          <LeadRouting results={lead.routingResults} deliveries={lead.deliveries} />
         </TabsContent>
         <TabsContent value="deliveries">
           <LeadDeliveries deliveries={lead.deliveries} />

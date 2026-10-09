@@ -109,6 +109,12 @@ export const DESTINATION_TYPE_INFO: Record<DestinationTypeValue, DestinationType
     type: "WEBHOOK",
     fields: [
       { key: "url", label: "Endpoint URL", hint: "required", placeholder: "https://example.com/webhook" },
+      {
+        key: "bodyMode",
+        label: "Body mode",
+        hint: "flat = mapped fields at top level",
+        options: ["envelope", "flat"],
+      },
       { key: "idempotencyHeader", label: "Idempotency header" },
       { key: "timeoutMs", label: "Timeout (ms)" },
     ],

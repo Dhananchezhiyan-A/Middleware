@@ -8,6 +8,9 @@ export interface DeliveryListParams {
   status?: DeliveryStatus;
   destinationId?: string;
   leadId?: string;
+  /** ISO bounds on `updatedAt` — drill-down ranges from the dashboard. */
+  from?: string;
+  to?: string;
   limit?: number;
 }
 
@@ -22,6 +25,8 @@ export function useDeliveryList(params: DeliveryListParams, enabled = true) {
           status: params.status,
           destinationId: params.destinationId,
           leadId: params.leadId,
+          from: params.from,
+          to: params.to,
           limit: params.limit ?? 25,
           cursor: pageParam,
         },

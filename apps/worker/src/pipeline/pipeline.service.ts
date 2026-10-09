@@ -22,8 +22,10 @@ import {
 } from "./validate-normalize";
 import {
   evaluateConditions,
-  parseConditions,
+  evaluateRouting,
   type ConditionContext,
+  type RoutingFallback,
+  type RoutingRuleInput,
 } from "./conditions";
 import { defaultMappedPayload } from "./default-payload";
 
@@ -55,6 +57,19 @@ interface StageContext {
   lead: LeadRow;
   canonical: CanonicalLead;
   score: number | null;
+}
+
+/** Result of the ROUTING stage: where the lead must be delivered. */
+interface RoutingOutcome {
+  /** Unique EXTERNAL destination ids — one delivery record each. */
+  destinationIds: string[];
+  /** Human-readable decision stored on RoutingResult.reason. */
+  reason: string;
+  matched: boolean;
+  /** true when the lead stays inside Middleware (no external delivery). */
+  usedFallback: boolean;
+  /** Internal fallback decision — null when the lead is routed externally. */
+  fallback: RoutingFallback | null;
 }
 
 const TERMINAL_DELIVERY_STATUSES = new Set(["SUCCEEDED", "FAILED", "DEAD", "SKIPPED"]);
@@ -199,9 +214,13 @@ export class PipelineService {
     ctx = { ...ctx, score: await this.runScoring(ctx) };
 
     // --- ROUTING ------------------------------------------------------------
-    const destinationIds = await this.runRouting(ctx);
+    const routing = await this.runRouting(ctx);
 
-    if (destinationIds.length === 0) {
+    if (routing.destinationIds.length === 0) {
+      // INTERNAL_MIDDLEWARE fallback: no valid external destination, so the
+      // lead simply stays inside Middleware. It is already persisted — this is
+      // neither an external delivery success nor a failure, just a retained
+      // lead that remains fully traceable (RoutingResult + stage events).
       await this.markLeadTerminal(ctx, "PROCESSED", "COMPLETED");
       await db.leadProcessing.update({ where: { leadId }, data: { finishedAt: new Date() } });
       await recordStage(db, {
@@ -209,14 +228,20 @@ export class PipelineService {
         stage: "COMPLETED",
         status: "PASSED",
         startedAt: new Date(),
-        detail: { reason: "no-destination-matched" },
+        // routing.reason carries the precise decision: no rule matched, or a
+        // rule matched with no usable destination — both keep it in Middleware.
+        detail: {
+          reason: "no-destination-matched",
+          routing: routing.reason,
+          fallback: routing.fallback,
+        },
         correlationId,
       });
       return { outcome: "no-destination", deliveries: 0 };
     }
 
     // --- MAPPING + FAN-OUT --------------------------------------------------
-    const deliveries = await this.runMappingAndFanout(ctx, destinationIds);
+    const deliveries = await this.runMappingAndFanout(ctx, routing.destinationIds);
 
     // Stage QUEUED BEFORE enqueueing: if the queue write fails, the sweeper
     // finds QUEUED deliveries with no job and re-enqueues them (no data loss).
@@ -267,9 +292,9 @@ export class PipelineService {
     if (stage === "ENRICHMENT") await this.runEnrichment(ctx);
     else if (stage === "SCORING") await this.runScoring(ctx);
     else {
-      const destinationIds = await this.runRouting(ctx);
+      const routing = await this.runRouting(ctx);
       this.logger.log(
-        `Routing re-run for lead ${job.leadId}: ${destinationIds.length} destination(s)`,
+        `Routing re-run for lead ${job.leadId}: ${routing.destinationIds.length} destination(s) — ${routing.reason}`,
       );
     }
   }
@@ -502,7 +527,23 @@ export class PipelineService {
     return outcome ?? null;
   }
 
-  private async runRouting(ctx: StageContext): Promise<string[]> {
+  /**
+   * Evaluates the active routing rules and resolves the EXTERNAL destination
+   * ids for this lead.
+   *
+   * The decision comes from the shared engine (`evaluateRouting` in
+   * `@middleware/integrations`) — the same code the API preview endpoint
+   * runs — so a preview always predicts what the pipeline will do.
+   *
+   * THE FALLBACK IS INTERNAL: `middleware` is THIS application, not a
+   * Destination. When no valid external destination remains the engine returns
+   * an empty `destinationIds` list together with the INTERNAL_MIDDLEWARE
+   * decision — the lead is already persisted, so it simply stays in Middleware.
+   * No Destination row is read or written, no Delivery row is created and
+   * nothing is enqueued; the decision goes to RoutingResult + the ROUTING stage
+   * event so the lead stays fully traceable.
+   */
+  private async runRouting(ctx: StageContext): Promise<RoutingOutcome> {
     const db = getPrisma();
     const { leadId, correlationId } = ctx;
 
@@ -510,68 +551,100 @@ export class PipelineService {
       db,
       { leadId, correlationId },
       "ROUTING",
-      async (): Promise<{ status: "PASSED"; detail: Record<string, unknown>; value: string[] }> => {
+      async (): Promise<{ status: "PASSED"; detail: Record<string, unknown>; value: RoutingOutcome }> => {
         const rules = await db.routingRule.findMany({
-          where: { enabled: true },
-          orderBy: { priority: "asc" },
+          orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
           include: {
             destinations: { orderBy: { order: "asc" }, include: { destination: true } },
           },
         });
 
+        const timezone = getEnv().APP_TIMEZONE;
         const condCtx: ConditionContext = {
           canonical: ctx.canonical as unknown as Record<string, unknown>,
           score: ctx.score,
-          source: { type: ctx.lead.source?.type, code: ctx.lead.source?.code },
+          source: {
+            type: ctx.lead.source?.type,
+            code: ctx.lead.source?.code,
+            name: ctx.lead.source?.name,
+            id: ctx.lead.sourceId,
+            accountId: ctx.lead.sourceAccountId,
+            accountName: ctx.lead.sourceAccount?.name,
+          },
+          // Server-side receive time drives date/time/month/day conditions.
+          receivedAt: ctx.lead.receivedAt,
+          timezone,
         };
 
-        const matchedRuleIds: string[] = [];
-        const destinationIds: string[] = [];
-        let stopped = false;
-
-        for (const rule of rules) {
-          if (stopped) break;
-          const matched = evaluateConditions(parseConditions(rule.conditions), condCtx);
-          if (!matched) continue;
-          matchedRuleIds.push(rule.id);
-          for (const target of rule.destinations) {
-            if (target.destination.status !== "ACTIVE") continue;
-            if (!destinationIds.includes(target.destinationId)) {
-              destinationIds.push(target.destinationId);
-            }
-          }
-          if (rule.stopOnMatch) stopped = true;
-        }
+        const evaluation = evaluateRouting(
+          rules.map<RoutingRuleInput>((rule) => ({
+            id: rule.id,
+            name: rule.name,
+            priority: rule.priority,
+            enabled: rule.enabled,
+            stopOnMatch: rule.stopOnMatch,
+            conditions: rule.conditions,
+            destinations: rule.destinations.map((target) => ({
+              id: target.destinationId,
+              name: target.destination.name,
+              type: target.destination.type,
+              status: target.destination.status,
+            })),
+          })),
+          condCtx,
+        );
 
         await db.routingResult.create({
           data: {
             leadId,
-            ruleId: matchedRuleIds[0] ?? null,
-            destinationIds: json(destinationIds),
-            matched: matchedRuleIds.length > 0,
-            reason:
-              matchedRuleIds.length > 0
-                ? `matched rules: ${matchedRuleIds.join(", ")}`
-                : "no routing rule matched",
+            ruleId: evaluation.matchedRuleIds[0] ?? null,
+            // EXTERNAL destinations only — the internal fallback never gets an
+            // id here because there is no Destination row for it (by design).
+            destinationIds: json(evaluation.destinationIds),
+            matched: evaluation.matchedRuleIds.length > 0,
+            // Carries `[INTERNAL_MIDDLEWARE]` when the lead stays in Middleware.
+            reason: evaluation.reason,
             // NOTE: RoutingResult has no correlationId column. Correlation
-            // lives on Lead.correlationId + the LeadStageEvent rows; the cast
-            // that used to sit here silently shipped an unknown argument that
-            // Prisma rejects at runtime.
+            // lives on Lead.correlationId + the LeadStageEvent rows.
           },
         });
+
+        const value: RoutingOutcome = {
+          destinationIds: evaluation.destinationIds,
+          reason: evaluation.reason,
+          matched: evaluation.matchedRuleIds.length > 0,
+          usedFallback: evaluation.usedFallback,
+          fallback: evaluation.fallback,
+        };
 
         return {
           status: "PASSED",
           detail: {
-            matchedRules: matchedRuleIds.length,
-            destinations: destinationIds.length,
-            matched: matchedRuleIds.length > 0,
+            matchedRules: evaluation.matchedRuleIds.length,
+            ruleNames: evaluation.matchedRuleNames,
+            // External destinations only: 0 means "kept in Middleware", which
+            // is never counted as an external delivery (success OR failure).
+            destinations: evaluation.destinationIds.length,
+            fallback: evaluation.fallback,
+            unavailableDestinations: evaluation.unavailableDestinationNames,
+            matched: value.matched,
+            usedFallback: evaluation.usedFallback,
+            reason: evaluation.reason,
+            timezone,
           },
-          value: destinationIds,
+          value,
         };
       },
     );
-    return outcome ?? [];
+    return (
+      outcome ?? {
+        destinationIds: [],
+        reason: "routing stage returned no outcome",
+        matched: false,
+        usedFallback: false,
+        fallback: null,
+      }
+    );
   }
 
   private async runMappingAndFanout(

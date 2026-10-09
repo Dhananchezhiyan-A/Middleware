@@ -1,4 +1,6 @@
-import { Activity, Boxes, CircleCheck, Inbox } from "lucide-react";
+import { Activity, Boxes, CircleCheck, Inbox, Route } from "lucide-react";
+import Link from "next/link";
+import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -10,6 +12,22 @@ import type {
   QueueStats,
   SourcePerformanceRow,
 } from "@/lib/types";
+
+/**
+ * Optional drill-down wrapper: when `href` is given the card becomes a link
+ * that carries the metric's filter to its detail page.
+ */
+function CardLink({ href, children }: { href?: string; children: ReactNode }) {
+  if (!href) return <>{children}</>;
+  return (
+    <Link
+      href={href}
+      className="group block rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {children}
+    </Link>
+  );
+}
 
 function statusCell(counts: Partial<Record<string, number>> | undefined, key: string) {
   return <span className="tabular-nums">{formatNumber(counts?.[key] ?? 0)}</span>;
@@ -156,14 +174,15 @@ export function DestinationPerformanceTable({ rows }: { rows: DestinationPerform
 }
 
 /** Queue health — real BullMQ counts; a queue reporting an error shows it verbatim. */
-export function QueueHealthCard({ stats }: { stats: QueueStats | undefined }) {
+export function QueueHealthCard({ stats, href }: { stats: QueueStats | undefined; href?: string }) {
   const entries = stats ? Object.entries(stats.queues) : [];
   const degraded = entries.filter(([, value]) => "error" in value);
   const dlqEntries = stats ? Object.entries(stats.deadLetters) : [];
 
   return (
-    <Card>
-      <CardHeader>
+    <CardLink href={href}>
+      <Card className="h-full transition-colors group-hover:border-primary/45">
+        <CardHeader>
         <div className="flex items-center justify-between gap-2">
           <CardTitle>Queue health</CardTitle>
           {!stats ? (
@@ -224,74 +243,129 @@ export function QueueHealthCard({ stats }: { stats: QueueStats | undefined }) {
           </div>
         ) : null}
       </CardContent>
-    </Card>
+      </Card>
+    </CardLink>
   );
 }
 
 /**
  * Delivery outcomes from GET /analytics/overview.
  * `successRate` is already a percentage (0–100) or null when nothing delivered.
+ *
+ * `successHref` / `attemptsHref` turn each metric into a drill-down link that
+ * preserves the metric (delivery analytics / attempt details).
  */
-export function DeliverySummaryCard({ delivery }: { delivery: AnalyticsOverview["deliveries"] }) {
+export function DeliverySummaryCard({
+  delivery,
+  successHref,
+  attemptsHref,
+}: {
+  delivery: AnalyticsOverview["deliveries"];
+  successHref?: string;
+  attemptsHref?: string;
+}) {
   const rate = delivery?.successRate ?? null;
   const failed = delivery?.byStatus?.FAILED ?? 0;
   const dead = delivery?.byStatus?.DEAD ?? 0;
 
   return (
     <div className="grid gap-4 sm:grid-cols-2">
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between gap-2">
-            <CardTitle>Delivery success rate</CardTitle>
-            <CircleCheck className="size-4 text-emerald-500" />
-          </div>
-          <CardDescription>
-            {delivery
-              ? `${formatNumber(delivery.succeeded)} succeeded · ${formatNumber(failed)} failed · ${formatNumber(dead)} dead`
-              : "Delivery metrics not returned."}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <p className="text-3xl font-semibold tabular-nums tracking-tight">
-            {rate === null ? EMPTY : formatPercent(rate)}
-          </p>
-          <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-            <div
-              className="h-full rounded-full bg-emerald-500 transition-all"
-              style={{ width: `${rate === null ? 0 : Math.min(rate, 100)}%` }}
-            />
-          </div>
-          <p className="mt-2 text-[11px] text-muted-foreground">
-            {delivery ? `${formatNumber(delivery.total)} deliveries in total` : "—"}
-          </p>
-        </CardContent>
-      </Card>
+      <CardLink href={successHref}>
+        <Card className="h-full transition-colors group-hover:border-primary/45">
+          <CardHeader>
+            <div className="flex items-center justify-between gap-2">
+              <CardTitle>Delivery success rate</CardTitle>
+              <CircleCheck className="size-4 text-emerald-500" />
+            </div>
+            <CardDescription>
+              {delivery
+                ? `${formatNumber(delivery.succeeded)} succeeded · ${formatNumber(failed)} failed · ${formatNumber(dead)} dead`
+                : "Delivery metrics not returned."}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-3xl font-semibold tabular-nums tracking-tight">
+              {rate === null ? EMPTY : formatPercent(rate)}
+            </p>
+            <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-emerald-500 transition-all"
+                style={{ width: `${rate === null ? 0 : Math.min(rate, 100)}%` }}
+              />
+            </div>
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              {delivery ? `${formatNumber(delivery.total)} deliveries in total` : "—"}
+            </p>
+          </CardContent>
+        </Card>
+      </CardLink>
 
-      <Card>
+      <CardLink href={attemptsHref}>
+        <Card className="h-full transition-colors group-hover:border-primary/45">
+          <CardHeader>
+            <div className="flex items-center justify-between gap-2">
+              <CardTitle>Avg attempts to succeed</CardTitle>
+              <Activity className="size-4 text-primary" />
+            </div>
+            <CardDescription>Delivery attempts consumed by successful deliveries.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-3xl font-semibold tabular-nums tracking-tight">
+              {delivery?.avgAttemptsOnSuccess === null || delivery?.avgAttemptsOnSuccess === undefined
+                ? EMPTY
+                : formatNumber(delivery.avgAttemptsOnSuccess, 2)}
+            </p>
+            <div className="mt-3 flex items-center gap-2 text-[11px] text-muted-foreground">
+              <Boxes className="size-3.5" />
+              <span>
+                {delivery?.avgAttemptsOnSuccess === null ||
+                delivery?.avgAttemptsOnSuccess === undefined
+                  ? "No successful deliveries recorded."
+                  : "attempts per successful delivery"}
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+      </CardLink>
+    </div>
+  );
+}
+
+/**
+ * Routing analytics (GET /analytics/overview → `routing`): how many leads a
+ * rule matched, how many matched nothing, and how many the INTERNAL fallback
+ * kept inside Middleware (never an external delivery — success or failure).
+ * Links through to the routing rules list.
+ */
+export function RoutingSummaryCard({ routing }: { routing?: AnalyticsOverview["routing"] }) {
+  const entries: { label: string; value: number; hint: string }[] = [
+    { label: "Matched rules", value: routing?.matchedRules ?? 0, hint: "routed by a rule" },
+    { label: "Unmatched leads", value: routing?.unmatchedLeads ?? 0, hint: "no rule matched" },
+    { label: "Kept in Middleware", value: routing?.fallbackLeads ?? 0, hint: "internal fallback" },
+  ];
+
+  return (
+    <CardLink href="/automation/routing-rules">
+      <Card className="h-full transition-colors group-hover:border-primary/45">
         <CardHeader>
           <div className="flex items-center justify-between gap-2">
-            <CardTitle>Avg attempts to succeed</CardTitle>
-            <Activity className="size-4 text-primary" />
+            <CardTitle>Routing</CardTitle>
+            <Route className="size-4 text-primary" />
           </div>
-          <CardDescription>Delivery attempts consumed by successful deliveries.</CardDescription>
+          <CardDescription>Routing decisions recorded for processed leads.</CardDescription>
         </CardHeader>
-        <CardContent>
-          <p className="text-3xl font-semibold tabular-nums tracking-tight">
-            {delivery?.avgAttemptsOnSuccess === null || delivery?.avgAttemptsOnSuccess === undefined
-              ? EMPTY
-              : formatNumber(delivery.avgAttemptsOnSuccess, 2)}
-          </p>
-          <div className="mt-3 flex items-center gap-2 text-[11px] text-muted-foreground">
-            <Boxes className="size-3.5" />
-            <span>
-              {delivery?.avgAttemptsOnSuccess === null ||
-              delivery?.avgAttemptsOnSuccess === undefined
-                ? "No successful deliveries recorded."
-                : "attempts per successful delivery"}
-            </span>
-          </div>
+        <CardContent className="space-y-3">
+          {entries.map((entry) => (
+            <div key={entry.label}>
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="truncate text-xs text-muted-foreground">{entry.label}</span>
+                <span className="text-lg font-semibold tabular-nums">{formatNumber(entry.value)}</span>
+              </div>
+              <p className="text-[11px] text-muted-foreground/80">{entry.hint}</p>
+            </div>
+          ))}
         </CardContent>
       </Card>
-    </div>
+    </CardLink>
   );
 }

@@ -1,8 +1,11 @@
 import { createZodDto } from "nestjs-zod";
 import { z } from "zod";
-import { routingRuleUpsertSchema } from "@middleware/validation";
+import { routingPreviewSchema, routingRuleUpsertSchema } from "@middleware/validation";
 
 export class CreateRoutingRuleDto extends createZodDto(routingRuleUpsertSchema) {}
+
+/** Dry-run body for POST /routing-rules/preview. */
+export class PreviewRoutingRuleDto extends createZodDto(routingPreviewSchema) {}
 
 /**
  * PATCH accepts any subset of the upsert fields.

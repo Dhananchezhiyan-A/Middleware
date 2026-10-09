@@ -3,7 +3,7 @@ import { ApiOperation, ApiTags } from "@nestjs/swagger";
 import type { RequestActor } from "@middleware/types";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { RequirePermission } from "../../common/decorators/permissions.decorator";
-import { CreateRoutingRuleDto, UpdateRoutingRuleDto } from "./routing-rules.dtos";
+import { CreateRoutingRuleDto, PreviewRoutingRuleDto, UpdateRoutingRuleDto } from "./routing-rules.dtos";
 import { RoutingRulesService } from "./routing-rules.service";
 
 @ApiTags("routing-rules")
@@ -23,6 +23,16 @@ export class RoutingRulesController {
   @ApiOperation({ summary: "Create a routing rule with its ordered destinations" })
   async create(@CurrentUser() actor: RequestActor, @Body() body: CreateRoutingRuleDto) {
     return this.rules.createRule(actor, body);
+  }
+
+  @Post("preview")
+  @RequirePermission("routing:read")
+  @ApiOperation({
+    summary:
+      "Dry-run routing for a sample lead — evaluates every rule, never persists or delivers",
+  })
+  async preview(@CurrentUser() actor: RequestActor, @Body() body: PreviewRoutingRuleDto) {
+    return this.rules.preview(actor, body);
   }
 
   @Patch(":id")

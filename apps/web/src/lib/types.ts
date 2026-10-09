@@ -80,6 +80,8 @@ export interface AnalyticsOverview {
     byStatus: DeliveryCounts;
   };
   inbound: { webhookEvents24h: number };
+  /** Routing decisions written by the ROUTING stage (RoutingResult rows). */
+  routing: { matchedRules: number; unmatchedLeads: number; fallbackLeads: number };
   topSources: OverviewSourceRow[];
   topDestinations: OverviewDestinationRow[];
   generatedAt: string;
@@ -349,6 +351,18 @@ export interface SourceAccount {
   signingSecret?: string;
 }
 
+/** GET /webhooks/events — one row per inbound webhook attempt (observability). */
+export interface WebhookEventItem {
+  id: string;
+  sourceAccountId: string;
+  externalEventId?: string | null;
+  status: string;
+  leadId?: string | null;
+  error?: string | null;
+  receivedAt: string;
+  processedAt?: string | null;
+}
+
 /* ------------------------------- destinations ------------------------------ */
 
 export interface DestinationHealth {
@@ -395,6 +409,63 @@ export interface RuleCondition {
   value?: string | number | boolean | string[] | null;
 }
 
+/** Date clause of a routing rule (relative preset or explicit range). */
+export interface RoutingDateCondition {
+  preset: string;
+  from?: string;
+  to?: string;
+}
+
+/** Time window (HH:MM → HH:MM) evaluated in the application timezone. */
+export interface RoutingTimeCondition {
+  from: string;
+  to: string;
+}
+
+/**
+ * `RoutingRule.conditions` accepts two shapes:
+ *  - legacy flat array `RuleCondition[]` (ALL semantics), or
+ *  - a structured object adding source/date/time/month/day + nested OR groups.
+ */
+export interface StructuredRoutingConditions {
+  match: "ALL" | "ANY";
+  sourceId?: string;
+  sourceAccountId?: string;
+  date?: RoutingDateCondition;
+  time?: RoutingTimeCondition;
+  /** 1..12 January..December */
+  months?: number[];
+  /** 1..7 Monday..Sunday */
+  days?: number[];
+  conditions: RuleCondition[];
+  /** Nested OR groups — each group is ORed internally. */
+  anyGroups?: RuleCondition[][];
+}
+
+export type RoutingRuleConditions = RuleCondition[] | StructuredRoutingConditions;
+
+/** Normalizes both `conditions` shapes into the structured form. */
+export function normalizeRoutingConditions(
+  conditions: RoutingRule["conditions"],
+): StructuredRoutingConditions {
+  if (Array.isArray(conditions)) return { match: "ALL", conditions };
+  if (conditions && typeof conditions === "object") {
+    const structured: Partial<StructuredRoutingConditions> = conditions;
+    return {
+      match: structured.match === "ANY" ? "ANY" : "ALL",
+      sourceId: structured.sourceId,
+      sourceAccountId: structured.sourceAccountId,
+      date: structured.date,
+      time: structured.time,
+      months: structured.months,
+      days: structured.days,
+      conditions: Array.isArray(structured.conditions) ? structured.conditions : [],
+      anyGroups: structured.anyGroups,
+    };
+  }
+  return { match: "ALL", conditions: [] };
+}
+
 export interface RoutingRule {
   id: string;
   name: string;
@@ -402,10 +473,72 @@ export interface RoutingRule {
   enabled: boolean;
   priority: number;
   stopOnMatch: boolean;
-  conditions: RuleCondition[];
+  conditions: RoutingRuleConditions;
   version?: number;
   updatedAt: string;
+  /** Last lead this rule matched (from RoutingResult). */
+  lastMatchedAt?: string | null;
   destinations: { id: string; name: string; type: string; order?: number }[];
+}
+
+/* ------------------------------- routing preview -------------------------- */
+
+export interface RoutingPreviewClause {
+  key: string;
+  label: string;
+  matched: boolean;
+}
+
+export interface RoutingPreviewRule {
+  id: string;
+  name: string;
+  priority: number;
+  enabled: boolean;
+  stopOnMatch: boolean;
+  matched: boolean;
+  skipped: boolean;
+  clauses: RoutingPreviewClause[];
+}
+
+/** POST /routing-rules/preview — dry run, never persists or delivers. */
+export interface RoutingPreview {
+  timezone: string;
+  receivedAt: string;
+  /** true when at least one rule matched — NOT the same as "deliverable". */
+  matched: boolean;
+  /** true when the lead stays inside Middleware (no external destination). */
+  usedFallback: boolean;
+  reason: string;
+  rules: RoutingPreviewRule[];
+  /** Valid EXTERNAL destinations only — empty means "kept in Middleware". */
+  destinations: { id: string; name: string; type: string }[];
+  /** How many matched destinations are actually deliverable. */
+  validDestinationCount: number;
+  /** Internal fallback decision — null when a valid external destination exists. */
+  fallback: { type: string; reason: string } | null;
+  /** EXTERNAL deliveries the pipeline would create (never the fallback). */
+  deliveryCount: number;
+}
+
+/** An unsaved rule evaluated in place of the stored ones ("Test rule"). */
+export interface RoutingDraftRule {
+  name?: string;
+  priority?: number;
+  enabled?: boolean;
+  stopOnMatch?: boolean;
+  conditions: RoutingRuleConditions;
+  destinationIds: string[];
+}
+
+export interface RoutingPreviewInput {
+  ruleIds?: string[];
+  /** Draft rules (the rule being edited) evaluated instead of stored rules. */
+  rules?: RoutingDraftRule[];
+  sourceId?: string;
+  sourceAccountId?: string;
+  receivedAt?: string;
+  score?: number;
+  canonical?: Record<string, unknown>;
 }
 
 /* ------------------------------- field mappings ---------------------------- */

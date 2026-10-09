@@ -167,11 +167,23 @@ export class WebhooksService {
 
   async listEvents(
     _actor: RequestActor,
-    query: { status?: string; sourceAccountId?: string; cursor?: string | null; limit?: number },
+    query: {
+      status?: string;
+      sourceAccountId?: string;
+      cursor?: string | null;
+      limit?: number;
+      /** ISO bounds on receivedAt — powers the dashboard's 24h drill-down. */
+      from?: string;
+      to?: string;
+    },
   ) {
     const where: Record<string, unknown> = {};
     if (query.status) where["status"] = query.status;
     if (query.sourceAccountId) where["sourceAccountId"] = query.sourceAccountId;
+    const range: Record<string, Date> = {};
+    if (query.from) range["gte"] = new Date(query.from);
+    if (query.to) range["lte"] = new Date(query.to);
+    if (Object.keys(range).length > 0) where["receivedAt"] = range;
     const limit = Math.min(Math.max(query.limit ?? 25, 1), 100);
 
     const rows = await getPrisma().webhookEvent.findMany({

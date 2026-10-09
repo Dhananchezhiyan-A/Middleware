@@ -3,6 +3,7 @@
 import { Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { LeadFieldSelect } from "@/components/automation/lead-field-select";
 import type { FieldMappingField } from "@/lib/types";
 
 export interface FieldRow {
@@ -17,17 +18,28 @@ export function emptyRow(): FieldRow {
 
 /**
  * Rows → API `fields[]`. Returns an error string when a row is incomplete
- * instead of sending half-filled pairs the server would reject.
+ * or repeats a source already mapped by an earlier row, instead of sending
+ * half-filled/duplicate pairs the server would accept but never resolve.
  */
 export function rowsToFields(rows: FieldRow[]): { fields: FieldMappingField[]; error: string | null } {
   const usable = rows.filter((row) => row.source.trim() || row.target.trim());
   if (usable.length === 0) {
     return { fields: [], error: "Add at least one source → target pair." };
   }
+  const seenSources = new Map<string, number>();
   for (const [index, row] of usable.entries()) {
-    if (!row.source.trim() || !row.target.trim()) {
+    const source = row.source.trim();
+    if (!source || !row.target.trim()) {
       return { fields: [], error: `Row ${index + 1}: both source and target are required.` };
     }
+    const earlierRow = seenSources.get(source);
+    if (earlierRow !== undefined) {
+      return {
+        fields: [],
+        error: `Row ${index + 1}: source field "${source}" is already used in row ${earlierRow}.`,
+      };
+    }
+    seenSources.set(source, index + 1);
   }
   return {
     fields: usable.map((row) => ({
@@ -69,44 +81,52 @@ export function FieldEditor({ rows, onChange, disabled = false }: FieldEditorPro
         <span className="w-8" />
       </div>
 
-      {rows.map((row, index) => (
-        <div key={index} className="grid grid-cols-[1fr_1fr_auto_auto] items-center gap-2">
-          <Input
-            value={row.source}
-            onChange={(event) => update(index, { source: event.target.value })}
-            placeholder="email"
-            disabled={disabled}
-            className="font-mono text-xs"
-          />
-          <Input
-            value={row.target}
-            onChange={(event) => update(index, { target: event.target.value })}
-            placeholder="email_address"
-            disabled={disabled}
-            className="font-mono text-xs"
-          />
-          <label className="flex w-14 justify-center">
-            <input
-              type="checkbox"
-              className="size-3.5 accent-primary"
-              checked={row.required}
+      {rows.map((row, index) => {
+        // Sources taken by the other rows: offered in the dropdown, but disabled.
+        const usedSources = rows
+          .filter((_, i) => i !== index)
+          .map((other) => other.source.trim())
+          .filter((other) => other.length > 0);
+
+        return (
+          <div key={index} className="grid grid-cols-[1fr_1fr_auto_auto] items-center gap-2">
+            <LeadFieldSelect
+              value={row.source}
+              onChange={(source) => update(index, { source })}
+              usedValues={usedSources}
               disabled={disabled}
-              onChange={(event) => update(index, { required: event.target.checked })}
-              aria-label={`Row ${index + 1} required`}
+              ariaLabel={`Row ${index + 1} source field`}
             />
-          </label>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label={`Remove row ${index + 1}`}
-            disabled={disabled || rows.length === 1}
-            onClick={() => onChange(rows.filter((_, i) => i !== index))}
-          >
-            <X />
-          </Button>
-        </div>
-      ))}
+            <Input
+              value={row.target}
+              onChange={(event) => update(index, { target: event.target.value })}
+              placeholder="email_address"
+              disabled={disabled}
+              className="font-mono text-xs"
+            />
+            <label className="flex w-14 justify-center">
+              <input
+                type="checkbox"
+                className="size-3.5 accent-primary"
+                checked={row.required}
+                disabled={disabled}
+                onChange={(event) => update(index, { required: event.target.checked })}
+                aria-label={`Row ${index + 1} required`}
+              />
+            </label>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`Remove row ${index + 1}`}
+              disabled={disabled || rows.length === 1}
+              onClick={() => onChange(rows.filter((_, i) => i !== index))}
+            >
+              <X />
+            </Button>
+          </div>
+        );
+      })}
 
       <Button
         type="button"

@@ -1,10 +1,12 @@
 import { z } from "zod";
 import {
+  DatePresets,
   DestinationTypes,
   ImportJobStatuses,
   LeadStatuses,
   MatchedFields,
   RuleOperators,
+  RoutingMatchModes,
   SourceTypes,
 } from "@middleware/types";
 
@@ -85,14 +87,95 @@ export const ruleConditionSchema = z.object({
   value: z.union([z.string().max(500), z.number(), z.boolean(), z.array(z.union([z.string(), z.number()])).max(50)]).optional(),
 });
 
+const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Structured routing conditions: source + optional date/time/month/day plus
+ * lead-field conditions (and nested OR groups). Stored as a JSON object in
+ * `RoutingRule.conditions`; the legacy flat array shape stays valid.
+ */
+export const routingConditionsSchema = z
+  .object({
+    match: z.enum(RoutingMatchModes).default("ALL"),
+    /** Source / Source Account are matched by database ID, never by display name. */
+    sourceId: idSchema.optional(),
+    sourceAccountId: idSchema.optional(),
+    date: z
+      .object({
+        preset: z.enum(DatePresets),
+        from: z.string().regex(ISO_DATE, "from must be YYYY-MM-DD").optional(),
+        to: z.string().regex(ISO_DATE, "to must be YYYY-MM-DD").optional(),
+      })
+      .optional(),
+    /** 09:00 → 18:00 window in APP_TIMEZONE (wraps past midnight when from > to). */
+    time: z
+      .object({
+        from: z.string().regex(HHMM, "Time must be HH:MM"),
+        to: z.string().regex(HHMM, "Time must be HH:MM"),
+      })
+      .optional(),
+    /** 1..12 January..December */
+    months: z.array(z.number().int().min(1).max(12)).min(1).max(12).optional(),
+    /** 1..7 Monday..Sunday */
+    days: z.array(z.number().int().min(1).max(7)).min(1).max(7).optional(),
+    conditions: z.array(ruleConditionSchema).max(20).default([]),
+    /** Nested OR groups: each group is ORed internally, groups join the rest. */
+    anyGroups: z.array(z.array(ruleConditionSchema).min(1).max(20)).max(5).optional(),
+  })
+  .refine(
+    (v) =>
+      Boolean(
+        v.sourceId ||
+          v.sourceAccountId ||
+          v.date ||
+          v.time ||
+          v.months ||
+          v.days ||
+          v.conditions.length > 0 ||
+          (v.anyGroups && v.anyGroups.length > 0),
+      ),
+    { message: "A routing rule needs at least one condition" },
+  );
+
 export const routingRuleUpsertSchema = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(1000).optional(),
   enabled: z.boolean().default(true),
   priority: z.coerce.number().int().min(1).max(10_000).default(100),
-  stopOnMatch: z.boolean().default(true),
-  conditions: z.array(ruleConditionSchema).min(1).max(20),
+  /** false = "send to all matching destinations", true = "stop after first match". */
+  stopOnMatch: z.boolean().default(false),
+  conditions: z.union([z.array(ruleConditionSchema).min(1).max(20), routingConditionsSchema]),
   destinationIds: z.array(idSchema).min(1).max(20),
+});
+
+/** An unsaved rule the preview evaluates in place of a stored one. */
+const routingDraftRuleSchema = z.object({
+  name: z.string().max(120).optional(),
+  priority: z.number().int().min(1).max(10_000).optional(),
+  enabled: z.boolean().optional(),
+  stopOnMatch: z.boolean().optional(),
+  /** Same two shapes as an upsert — legacy flat array or structured object. */
+  conditions: z.union([z.array(ruleConditionSchema).max(20), routingConditionsSchema]),
+  destinationIds: z.array(idSchema).min(1).max(20),
+});
+
+/** Dry-run input for POST /routing-rules/preview — never persists or delivers. */
+export const routingPreviewSchema = z.object({
+  /** Optional rule subset; when absent every enabled rule is evaluated. */
+  ruleIds: z.array(idSchema).max(100).optional(),
+  /**
+   * Draft rules (the rule currently being edited) evaluated instead of the
+   * stored ones — makes "Test rule" work before the rule is saved.
+   */
+  rules: z.array(routingDraftRuleSchema).max(25).optional(),
+  sourceId: idSchema.optional(),
+  sourceAccountId: idSchema.optional(),
+  /** Server-side-style receive timestamp (ISO-8601); defaults to now. */
+  receivedAt: z.string().datetime().optional(),
+  score: z.number().optional(),
+  /** Sample canonical lead to evaluate lead-field conditions against. */
+  canonical: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const fieldMappingFieldSchema = z.object({

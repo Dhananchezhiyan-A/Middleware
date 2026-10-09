@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/queries/keys";
-import type { DestinationItem, DestinationTestResult, DestinationTypeInfo, SourceAccount, SourceItem } from "@/lib/types";
+import type { DestinationItem, DestinationTestResult, DestinationTypeInfo, SourceAccount, SourceItem, WebhookEventItem } from "@/lib/types";
 
 /* --------------------------------- sources --------------------------------- */
 
@@ -19,6 +19,33 @@ export function useSourceAccounts(sourceId: string | null, enabled = true) {
     enabled: Boolean(sourceId) && enabled,
     // GET /sources/:id/accounts returns a bare array; the server appends webhookUrl.
     queryFn: () => api.get<SourceAccount[]>(`/sources/${sourceId}/accounts`),
+  });
+}
+
+export interface WebhookEventListParams {
+  status?: string;
+  sourceAccountId?: string;
+  /** ISO bounds on receivedAt — the dashboard's "Inbound webhooks (24h)" drill-down. */
+  from?: string;
+  to?: string;
+  limit?: number;
+}
+
+/** GET /webhooks/events — `{ items, nextCursor }`. */
+export function useWebhookEvents(params: WebhookEventListParams, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.sources.events(params),
+    enabled,
+    queryFn: () =>
+      api.get<{ items: WebhookEventItem[]; nextCursor: string | null }>("/webhooks/events", {
+        query: {
+          status: params.status,
+          sourceAccountId: params.sourceAccountId,
+          from: params.from,
+          to: params.to,
+          limit: params.limit ?? 50,
+        },
+      }),
   });
 }
 
