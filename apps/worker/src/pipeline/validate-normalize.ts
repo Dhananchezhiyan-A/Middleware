@@ -6,52 +6,14 @@ import type { CanonicalLead } from "@middleware/types";
  * VALIDATION and NORMALIZATION stages — pure functions, unit-tested without
  * Redis or PostgreSQL.
  *
- * Validation decides whether a lead CAN enter the distribution pipeline.
  * Normalization produces the canonical data every later stage reads, plus the
- * application-keyed dedup hashes stored on the Lead row (never raw PII in index columns).
+ * application-keyed dedup hashes stored on the Lead row (never raw PII in index
+ * columns).
+ *
+ * The VALIDATION rule set itself lives in `@middleware/validation`
+ * (`validateCanonical`) so the CSV upload UI validates rows with EXACTLY the
+ * rules this pipeline applies — import the helper from there.
  */
-
-export interface ValidationResult {
-  ok: boolean;
-  errors: string[];
-  warnings: string[];
-}
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
-/** Loose international phone: optional +, 7–15 digits after separators. */
-const PHONE_RE = /^\+?[\d\s\-().]{7,25}$/;
-
-export function validateCanonical(canonical: CanonicalLead): ValidationResult {
-  const errors: string[] = [];
-  const warnings: string[] = [];
-
-  const email =
-    typeof canonical.email === "string" && canonical.email.trim() !== "" ? canonical.email : undefined;
-  const phone =
-    typeof canonical.phone === "string" && canonical.phone.trim() !== "" ? canonical.phone : undefined;
-
-  if (email === undefined && phone === undefined) {
-    errors.push("Lead must contain at least one contact channel (email or phone).");
-  }
-  if (email !== undefined && !EMAIL_RE.test(email.trim())) {
-    errors.push("Email address is not in a valid format.");
-  }
-  if (canonical.emailAlt && !EMAIL_RE.test(canonical.emailAlt.trim())) {
-    warnings.push("Alternate email address looks invalid and will be kept verbatim.");
-  }
-  if (phone !== undefined && !PHONE_RE.test(phone.trim())) {
-    errors.push("Phone number is not in a valid format.");
-  }
-  if (canonical.budget !== undefined && canonical.budget !== null) {
-    if (typeof canonical.budget !== "number" || Number.isNaN(canonical.budget)) {
-      errors.push("Budget must be numeric.");
-    } else if (canonical.budget < 0) {
-      errors.push("Budget cannot be negative.");
-    }
-  }
-
-  return { ok: errors.length === 0, errors, warnings };
-}
 
 function str(v: unknown): string | undefined {
   if (typeof v !== "string") return undefined;

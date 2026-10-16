@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CanonicalLead } from "@middleware/types";
-import {
-  dedupHash,
-  normalizeCanonical,
-  normalizePhone,
-  validateCanonical,
-} from "./validate-normalize";
+import { validateCanonical } from "@middleware/validation";
+import { dedupHash, normalizeCanonical, normalizePhone } from "./validate-normalize";
 
 const VALID_EMAIL = "  Priya@Example.COM ";
 

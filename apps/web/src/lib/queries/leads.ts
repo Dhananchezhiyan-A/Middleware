@@ -1,12 +1,18 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { LeadStatus } from "@middleware/types";
+import type { QuickRange } from "@middleware/validation";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/queries/keys";
 import type {
+  DeliveryStats,
   LeadAuditEntry,
   LeadDetail,
   LeadListPage,
+  LeadSelectionToken,
+  ManualSendPreview,
+  ManualSendResult,
 } from "@/lib/types";
+import type { SelectionOnlyPayload } from "@/lib/selection";
 
 export interface LeadListParams {
   status?: LeadStatus;
@@ -14,6 +20,12 @@ export interface LeadListParams {
   from?: string;
   to?: string;
   q?: string;
+  /** Server-interpreted calendar filters (APP_TIMEZONE). */
+  dateFrom?: string;
+  timeFrom?: string;
+  dateTo?: string;
+  timeTo?: string;
+  quickRange?: QuickRange;
   sort?: "receivedAt:asc" | "receivedAt:desc";
   limit?: number;
 }
@@ -32,6 +44,11 @@ export function useLeadList(params: LeadListParams, enabled = true) {
           from: params.from,
           to: params.to,
           q: params.q,
+          dateFrom: params.dateFrom,
+          timeFrom: params.timeFrom,
+          dateTo: params.dateTo,
+          timeTo: params.timeTo,
+          quickRange: params.quickRange,
           sort: params.sort,
           limit: params.limit ?? 25,
           cursor: pageParam,
@@ -149,5 +166,58 @@ export function useCreateLead() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.leads.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.dashboard });
     },
+  });
+}
+
+/* ------------------------- manual lead delivery ---------------------------- */
+
+/**
+ * POST /leads/selection — perm: leads:read. Resolves EVERY lead matching the
+ * filters into an expiring server-side snapshot; the browser only gets a
+ * token + count (off-page lead IDs never leave the server).
+ */
+export function useCreateSelection() {
+  return useMutation({
+    mutationFn: (filters: LeadListParams) => api.post<LeadSelectionToken>("/leads/selection", filters),
+  });
+}
+
+export type ManualSendPayload = SelectionOnlyPayload & { destinationIds: string[] };
+
+/** POST /leads/manual-send/preview — perm: leads:replay. */
+export function useSendPreview() {
+  return useMutation({
+    mutationFn: (body: ManualSendPayload) => api.post<ManualSendPreview>("/leads/manual-send/preview", body),
+  });
+}
+
+/** POST /leads/manual-send — perm: leads:replay. Queues deliveries; never delivers inline. */
+export function useManualSend() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: ManualSendPayload) => api.post<ManualSendResult>("/leads/manual-send", body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.leads.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.deliveries.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.dashboard });
+    },
+  });
+}
+
+/**
+ * GET /deliveries/stats?correlationId= — perm: deliveries:read.
+ * `refetchInterval` is controlled by the caller (2s while the submission is
+ * still moving, then stopped so an idle panel never polls).
+ */
+export function useDeliveryStats(
+  correlationId: string | null,
+  refetchInterval: number | false | ((query: unknown) => number | false | undefined),
+) {
+  return useQuery({
+    queryKey: queryKeys.deliveries.stats(correlationId ?? ""),
+    enabled: Boolean(correlationId),
+    refetchInterval,
+    queryFn: () =>
+      api.get<DeliveryStats>("/deliveries/stats", { query: { correlationId: correlationId ?? "" } }),
   });
 }

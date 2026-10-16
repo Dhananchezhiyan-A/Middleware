@@ -150,6 +150,22 @@ export class AllExceptionsFilter implements ExceptionFilter {
       };
     }
 
+    // multer upload errors (file too large, wrong field, too many files) —
+    // plain Error subclasses carrying a `code`, not Nest HttpExceptions.
+    // Without this branch an oversized CSV upload fell through to
+    // errors.internal() → a 500 for what is an ordinary client error.
+    const maybeMulter = exception as { name?: unknown; code?: unknown };
+    if (maybeMulter?.name === "MulterError" && typeof maybeMulter.code === "string") {
+      const tooLarge = maybeMulter.code === "LIMIT_FILE_SIZE";
+      return {
+        appError: new AppError(
+          tooLarge ? "PAYLOAD_TOO_LARGE" : "BAD_REQUEST",
+          tooLarge ? "Uploaded file exceeds the size limit." : "Invalid file upload.",
+        ),
+        internal: false,
+      };
+    }
+
     // Prisma runtime errors (unique violation, connection issues…)
     const maybePrisma = exception as { code?: string; meta?: unknown };
     if (typeof maybePrisma?.code === "string" && maybePrisma.code.startsWith("P")) {

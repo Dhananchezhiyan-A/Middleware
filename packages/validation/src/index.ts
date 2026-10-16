@@ -9,6 +9,7 @@ import {
   RoutingMatchModes,
   SourceTypes,
 } from "@middleware/types";
+import { receivedRangeShape } from "./received-range";
 
 /** CUID / opaque id accepted anywhere an id is expected. */
 export const idSchema = z
@@ -46,13 +47,23 @@ export const passwordSchema = z
 
 // --- List queries -----------------------------------------------------------
 
-export const leadListQuerySchema = cursorQuerySchema.extend({
+/**
+ * Filter criteria WITHOUT pagination — shared by `GET /leads` (with cursor)
+ * and the server-side selection endpoint, so a selection is resolved with
+ * exactly the same where-clause the list shows.
+ */
+export const leadFilterQuerySchema = z.object({
   status: z.enum(LeadStatuses).optional(),
   sourceId: idSchema.optional(),
   destinationId: idSchema.optional(),
   scoreMin: z.coerce.number().int().min(0).max(1000).optional(),
   q: z.string().max(200).optional(),
   ...dateRangeQuerySchema.shape,
+  ...receivedRangeShape,
+});
+
+export const leadListQuerySchema = cursorQuerySchema.extend({
+  ...leadFilterQuerySchema.shape,
   sort: z.enum(["receivedAt:asc", "receivedAt:desc"]).optional(),
 });
 
@@ -62,6 +73,8 @@ export const deliveryListQuerySchema = cursorQuerySchema.extend({
     .optional(),
   destinationId: idSchema.optional(),
   leadId: idSchema.optional(),
+  /** Groups the deliveries of one operation (e.g. a manual send submission). */
+  correlationId: idSchema.optional(),
   ...dateRangeQuerySchema.shape,
 });
 
@@ -346,3 +359,11 @@ export const changePasswordSchema = z.object({
   currentPassword: z.string().min(1).max(128),
   newPassword: passwordSchema,
 });
+
+// --- CSV import -------------------------------------------------------------
+// Shared by ALL consumers of an uploaded file: the API validates content and
+// limits with it, the worker turns rows into leads with it, and the upload UI
+// previews/maps/validates with it — so preview and import can never disagree.
+export * from "./csv";
+export * from "./lead";
+export * from "./received-range";

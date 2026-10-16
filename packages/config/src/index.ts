@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import { z } from "zod";
 
@@ -30,6 +30,24 @@ function ensureDotenv(): void {
   loaded = true;
   const envPath = findRootEnv();
   if (envPath) loadDotenv({ path: envPath, quiet: true });
+  normalizeRelativePaths(envPath);
+}
+
+/**
+ * Relative paths in `.env` must mean the same directory for EVERY process.
+ * The API writes CSV uploads to STORAGE_LOCAL_DIR and the worker reads them
+ * back, but each app runs with its own package directory as cwd — a relative
+ * path would silently diverge (`apps/api/storage` vs `apps/worker/storage`)
+ * and the worker would never find the uploaded file. Anchor relative values
+ * at the workspace root (the directory owning the `.env`), exactly like
+ * `.env` itself is located above. Absolute values pass through untouched.
+ */
+function normalizeRelativePaths(envPath: string | null): void {
+  const key = "STORAGE_LOCAL_DIR";
+  const value = process.env[key] ?? "./storage";
+  if (isAbsolute(value)) return;
+  const base = envPath ? dirname(envPath) : process.cwd();
+  process.env[key] = resolve(base, value);
 }
 
 const bool = (def: boolean) =>
@@ -100,6 +118,13 @@ const envSchema = z.object({
   CSV_IMPORT_CONCURRENCY: int(2, 1),
   DELIVERY_MAX_ATTEMPTS: int(5, 1, 20),
   DELIVERY_TIMEOUT_MS: int(15_000, 100),
+
+  // Manual "send selected leads" (server-side selection + bounded batches).
+  // LEAD_SELECTION_MAX caps an all-filtered selection snapshot; a single send
+  // may never request more than MANUAL_SEND_MAX_DELIVERIES lead×destination
+  // combinations (both fail loudly with a clear message when exceeded).
+  LEAD_SELECTION_MAX: int(10_000, 1),
+  MANUAL_SEND_MAX_DELIVERIES: int(5_000, 1),
 
   // Storage
   STORAGE_DRIVER: z.enum(["local", "s3"]).default("local"),

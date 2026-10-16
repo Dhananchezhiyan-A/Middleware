@@ -44,9 +44,26 @@ export interface ReplayDeliveryJob extends JobBase {
   requestedBy: string;
 }
 
+/**
+ * One CSV column → one canonical lead field.
+ *
+ * `target` is a canonical path (a `LEAD_FIELDS` key such as `email`,
+ * `name.first`, `custom.<anything>`) or `""` to skip the column entirely.
+ * Absent mapping entries fall back to header-alias detection, so an import
+ * created before column mapping still behaves identically.
+ */
+export interface CsvColumnMapping {
+  /** CSV header text exactly as it appears in the file. */
+  column: string;
+  /** Canonical lead field this column feeds ("" = ignore the column). */
+  target: string;
+}
+
 export interface ImportCsvJob extends JobBase {
   importJobId: string;
   createdBy: string;
+  /** User-confirmed column mapping chosen in the upload UI. */
+  mapping?: CsvColumnMapping[];
 }
 
 /** Payload actually dispatched to a destination adapter (snapshot in memory). */

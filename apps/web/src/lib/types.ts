@@ -11,6 +11,7 @@ import type {
   DeduplicationStatus,
   DeliveryStatus,
   FieldMappingStatus,
+  ImportJobStatus,
   LeadStage,
   LeadStatus,
   StageStatus,
@@ -23,6 +24,7 @@ export type {
   DeduplicationStatus,
   DeliveryStatus,
   FieldMappingStatus,
+  ImportJobStatus,
   LeadStage,
   LeadStatus,
   StageStatus,
@@ -186,6 +188,67 @@ export interface LeadListItem {
 
 export type LeadListPage = CursorPage<LeadListItem>;
 
+/* --------------------------- manual lead delivery -------------------------- */
+
+/** POST /leads/selection — expiring server-side "all filtered leads" snapshot. */
+export interface LeadSelectionToken {
+  token: string;
+  count: number;
+  expiresAt: string;
+  mode: "filtered";
+  filters: Record<string, unknown>;
+}
+
+/** POST /leads/manual-send/preview — authoritative pre-send counts. */
+export interface ManualSendPreview {
+  mode: "page" | "filtered";
+  filters: Record<string, unknown> | null;
+  leadCount: number;
+  /** Selected leads that were deleted since the selection was made. */
+  missingLeads: number;
+  destinations: Array<{ id: string; name: string; type: string; status: string }>;
+  combinations: number;
+  eligible: number;
+  skippedExisting: number;
+  skippedMissingLeads: number;
+  limits: { maxLeads: number; maxCombinations: number };
+}
+
+/** POST /leads/manual-send — immediate outcome of a confirmed submission. */
+export interface ManualSendResult {
+  submissionId: string;
+  mode: "page" | "filtered";
+  filters: Record<string, unknown> | null;
+  leadCount: number;
+  missingLeads: number;
+  destinations: Array<{ id: string; name: string; type: string }>;
+  combinations: number;
+  /** New deliveries queued for the worker. */
+  created: number;
+  /** Existing deliveries + leads that no longer exist. */
+  skipped: number;
+  skippedExisting: number;
+  skippedMissingLeads: number;
+  /** Pairs rejected before any external call (mapping misses required fields). */
+  failed: number;
+  /** Rows whose enqueue failed — the worker sweeper re-enqueues them. */
+  enqueueFailures: number;
+  createdAt: string;
+}
+
+/** GET /deliveries/stats?correlationId= — live per-status delivery counts. */
+export interface DeliveryStats {
+  correlationId: string;
+  total: number;
+  byStatus: Record<string, number>;
+  destinations: Array<{
+    id: string;
+    name: string;
+    type: string;
+    byStatus: Record<string, number>;
+  }>;
+}
+
 export interface RawPayload {
   id: string;
   payload: unknown;
@@ -322,6 +385,38 @@ export interface LeadAuditEntry {
   metadata?: unknown;
   correlationId?: string | null;
   createdAt: string;
+}
+
+/* --------------------------------- imports -------------------------------- */
+
+/** GET /imports/:id — safe shape (storageKey/checksum stay server-side). */
+export interface ImportJobItem {
+  id: string;
+  fileName: string;
+  fileSizeBytes: number;
+  status: ImportJobStatus;
+  /** Every data row in the file, including the ones skipped as empty. */
+  totalRows: number;
+  /** Rows ATTEMPTED (created + duplicate + failed). skipped = total - this. */
+  processedRows: number;
+  successfulRows: number;
+  failedRows: number;
+  duplicateRows: number;
+  createdAt: string;
+  finishedAt: string | null;
+  error: string | null;
+}
+
+/** One failed row: the CSV row number plus why it was not imported. */
+export interface ImportRowErrorItem {
+  rowNumber: number;
+  error: string;
+  rawRow: Record<string, unknown>;
+}
+
+export interface ImportRowErrorPage {
+  items: ImportRowErrorItem[];
+  nextCursor: string | null;
 }
 
 /* --------------------------------- sources --------------------------------- */

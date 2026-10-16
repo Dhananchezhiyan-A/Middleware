@@ -5,6 +5,9 @@ import type { CanonicalLead } from "@middleware/types";
  * mapping configured. It flattens the most common canonical fields into a
  * neutral shape — per-destination mappings (FieldMapping ACTIVE versions)
  * remain the recommended, fully configurable path.
+ *
+ * Shared by the worker's routing fan-out and the API's manual-send path so
+ * both snapshot the SAME payload shape onto the delivery row.
  */
 export function defaultMappedPayload(
   canonical: CanonicalLead,

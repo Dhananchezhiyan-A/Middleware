@@ -444,17 +444,8 @@ export function RoutingRuleDialog({
           <section className="space-y-3 rounded-md border border-border p-3">
             <header>
               <p className="text-xs font-semibold">When does this rule fire?</p>
-              <p className="text-[11px] text-muted-foreground">
-                Date, time, month and weekday are evaluated with the lead&apos;s server-side receive
-                time in the application timezone.
-              </p>
             </header>
-            <RoutingConstraints
-              register={register}
-              watch={watch}
-              setValue={setValue}
-              errors={errors}
-            />
+            <RoutingConstraints register={register} watch={watch} setValue={setValue} />
           </section>
 
           <ConditionsEditor control={control} register={register} watch={watch} errors={errors} />

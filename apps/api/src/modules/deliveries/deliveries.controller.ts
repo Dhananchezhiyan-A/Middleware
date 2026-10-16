@@ -35,6 +35,14 @@ export class DeliveriesController {
     return this.deliveries.failedJobs(queue || "delivery", limit ? Number(limit) : undefined);
   }
 
+  // Declared before GET :id so "stats" is never captured as a delivery id.
+  @Get("stats")
+  @RequirePermission("deliveries:read")
+  @ApiOperation({ summary: "Live status counts for one operation (manual-send progress)" })
+  stats(@Query("correlationId") correlationId: string) {
+    return this.deliveries.stats(correlationId ?? "");
+  }
+
   @Get()
   @RequirePermission("deliveries:read")
   @ApiOperation({ summary: "List deliveries (cursor pagination + filters)" })

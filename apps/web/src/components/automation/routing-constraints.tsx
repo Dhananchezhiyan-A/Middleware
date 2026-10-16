@@ -1,15 +1,11 @@
 "use client";
 
 import {
-  type FieldErrors,
   type UseFormRegister,
   type UseFormSetValue,
   type UseFormWatch,
 } from "react-hook-form";
-import { DatePresets, DAY_NAMES, MONTH_NAMES, type DatePreset } from "@middleware/types";
-import type { ReactNode } from "react";
 import { FieldLabel } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import type { ConditionFormValues } from "@/components/automation/conditions-editor";
 import { useSourceAccounts, useSources } from "@/lib/queries/integrations";
@@ -19,57 +15,6 @@ export interface RoutingConstraintsProps {
   register: UseFormRegister<ConditionFormValues>;
   watch: UseFormWatch<ConditionFormValues>;
   setValue: UseFormSetValue<ConditionFormValues>;
-  errors: FieldErrors<ConditionFormValues>;
-}
-
-const DATE_PRESET_LABELS: Record<DatePreset, string> = {
-  today: "Today",
-  yesterday: "Yesterday",
-  last_7_days: "Last 7 days",
-  last_30_days: "Last 30 days",
-  this_week: "This week",
-  last_week: "Last week",
-  this_month: "This month",
-  last_month: "Last month",
-  before: "Before a date",
-  after: "After a date",
-  between: "Between two dates",
-};
-
-const RANGE_PRESETS = new Set<string>(["before", "after", "between"]);
-
-function toggleNumber(list: number[], value: number): number[] {
-  const next = list.includes(value) ? list.filter((item) => item !== value) : [...list, value];
-  return next.sort((a, b) => a - b);
-}
-
-function ChipToggle({
-  active,
-  onClick,
-  children,
-  ariaLabel,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: ReactNode;
-  ariaLabel: string;
-}) {
-  return (
-    <button
-      type="button"
-      aria-label={ariaLabel}
-      aria-pressed={active}
-      onClick={onClick}
-      className={cn(
-        "rounded-md border px-2 py-1 text-[11px] transition-colors",
-        active
-          ? "border-primary bg-primary/15 text-primary"
-          : "border-border bg-background/40 text-muted-foreground hover:border-primary/40",
-      )}
-    >
-      {children}
-    </button>
-  );
 }
 
 function RadioRow({
@@ -112,24 +57,17 @@ function RadioRow({
 
 /**
  * Non-lead-field constraints of a routing rule:
- * source / source account, date, time window, months, weekdays plus the rule's
- * match mode (ALL/ANY) and routing mode (match-all vs stop-after-first).
- *
- * Date/time/month/day are evaluated in APP_TIMEZONE (server-side) — the
- * browser clock is never used for the decision.
+ * source / source account plus the rule's match mode (ALL/ANY) and routing
+ * mode (match-all vs stop-after-first).
  */
 export function RoutingConstraints({
   register,
   watch,
   setValue,
-  errors,
 }: RoutingConstraintsProps) {
   const sources = useSources();
   const sourceId = watch("sourceId") || "";
   const accounts = useSourceAccounts(sourceId || null, Boolean(sourceId));
-  const datePreset = watch("datePreset") || "";
-  const months = watch("months") ?? [];
-  const days = watch("days") ?? [];
   const match = watch("match") ?? "ALL";
   const stopOnMatch = watch("stopOnMatch") ?? false;
 
@@ -166,97 +104,6 @@ export function RoutingConstraints({
               </option>
             ))}
           </Select>
-        </div>
-      </div>
-
-      {/* --- Date --------------------------------------------------------- */}
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <FieldLabel label="Date" hint="in the application timezone" />
-          <Select aria-label="Date filter" {...register("datePreset")}>
-            <option value="">Any date</option>
-            {DatePresets.map((preset) => (
-              <option key={preset} value={preset}>
-                {DATE_PRESET_LABELS[preset]}
-              </option>
-            ))}
-          </Select>
-          {errors.datePreset ? (
-            <p className="text-[11px] text-destructive">{String(errors.datePreset.message)}</p>
-          ) : null}
-        </div>
-
-        {RANGE_PRESETS.has(datePreset) ? (
-          <div className="grid grid-cols-2 gap-2">
-            <div className="space-y-1.5">
-              <FieldLabel label="From" required={datePreset !== "after"} />
-              <Input type="date" aria-label="Date from" {...register("dateFrom")} />
-              {errors.dateFrom ? (
-                <p className="text-[11px] text-destructive">{String(errors.dateFrom.message)}</p>
-              ) : null}
-            </div>
-            <div className="space-y-1.5">
-              <FieldLabel label="To" required={datePreset !== "before"} />
-              <Input type="date" aria-label="Date to" {...register("dateTo")} />
-              {errors.dateTo ? (
-                <p className="text-[11px] text-destructive">{String(errors.dateTo.message)}</p>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
-      </div>
-
-      {/* --- Time window -------------------------------------------------- */}
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <FieldLabel label="Time from" hint="09:00–18:00 window, app timezone" />
-          <Input type="time" aria-label="Time from" {...register("timeFrom")} />
-        </div>
-        <div className="space-y-1.5">
-          <FieldLabel label="Time to" hint="wraps past midnight when later" />
-          <Input type="time" aria-label="Time to" {...register("timeTo")} />
-        </div>
-      </div>
-      {errors.timeFrom ? (
-        <p className="text-[11px] text-destructive">{String(errors.timeFrom.message)}</p>
-      ) : null}
-
-      {/* --- Months / weekdays -------------------------------------------- */}
-      <div className="space-y-2">
-        <FieldLabel label="Months" hint="none selected = every month" />
-        <div className="flex flex-wrap gap-1.5">
-          {MONTH_NAMES.map((name, index) => {
-            const value = index + 1;
-            return (
-              <ChipToggle
-                key={name}
-                ariaLabel={name}
-                active={months.includes(value)}
-                onClick={() => setValue("months", toggleNumber(months, value), { shouldDirty: true })}
-              >
-                {name.slice(0, 3)}
-              </ChipToggle>
-            );
-          })}
-        </div>
-      </div>
-
-      <div className="space-y-2">
-        <FieldLabel label="Weekdays" hint="ISO: Monday–Sunday, none = every day" />
-        <div className="flex flex-wrap gap-1.5">
-          {DAY_NAMES.map((name, index) => {
-            const value = index + 1;
-            return (
-              <ChipToggle
-                key={name}
-                ariaLabel={name}
-                active={days.includes(value)}
-                onClick={() => setValue("days", toggleNumber(days, value), { shouldDirty: true })}
-              >
-                {name.slice(0, 3)}
-              </ChipToggle>
-            );
-          })}
         </div>
       </div>
 

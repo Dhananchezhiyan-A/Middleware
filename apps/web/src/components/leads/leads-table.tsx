@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, type ChangeEvent } from "react";
 import { useRouter } from "next/navigation";
 import { formatDateTime, EMPTY } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +17,19 @@ import {
 } from "@/components/ui/table";
 import type { LeadListItem } from "@/lib/types";
 
+/** Checkbox-column wiring; omit the whole prop to render the plain table. */
+export interface LeadsTableSelection {
+  /** True when the lead is selected (a filtered snapshot selects every row). */
+  isSelected: (id: string) => boolean;
+  /** Header checkbox state — selects/deselects the CURRENT page. */
+  allSelected: boolean;
+  someSelected: boolean;
+  /** When true the snapshot covers all matching leads — rows are display-only. */
+  rowsDisabled: boolean;
+  onToggleRow: (id: string) => void;
+  onToggleAll: () => void;
+}
+
 export interface LeadsTableProps {
   rows: LeadListItem[];
   isLoading: boolean;
@@ -26,6 +40,42 @@ export interface LeadsTableProps {
   onLoadMore: () => void;
   emptyTitle?: string;
   emptyDescription?: string;
+  selection?: LeadsTableSelection;
+}
+
+/** Native checkbox with a proper indeterminate state (React can't set it via JSX). */
+function SelectCheckbox({
+  checked,
+  indeterminate = false,
+  disabled = false,
+  label,
+  onToggle,
+}: {
+  checked: boolean;
+  indeterminate?: boolean;
+  disabled?: boolean;
+  label: string;
+  onToggle: () => void;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = indeterminate;
+  }, [indeterminate]);
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={checked}
+      disabled={disabled}
+      aria-label={label}
+      className="size-4 cursor-pointer accent-primary disabled:cursor-default"
+      onClick={(event) => event.stopPropagation()}
+      onChange={(event: ChangeEvent<HTMLInputElement>) => {
+        event.stopPropagation();
+        onToggle();
+      }}
+    />
+  );
 }
 
 function contactCell(lead: LeadListItem): { primary: string; secondary: string } {
@@ -48,10 +98,11 @@ export function LeadsTable({
   onLoadMore,
   emptyTitle = "No leads found",
   emptyDescription = "Leads matching the current filters will appear here.",
+  selection,
 }: LeadsTableProps) {
   const router = useRouter();
 
-  if (isLoading) return <TableSkeleton rows={8} cols={5} />;
+  if (isLoading) return <TableSkeleton rows={8} cols={selection ? 6 : 5} />;
   if (error) return <ErrorState error={error} onRetry={onRetry} />;
   if (rows.length === 0) return <EmptyState title={emptyTitle} description={emptyDescription} />;
 
@@ -60,6 +111,20 @@ export function LeadsTable({
       <Table>
         <TableHeader>
           <TableRow>
+            {selection ? (
+              <TableHead className="w-10">
+                <SelectCheckbox
+                  checked={selection.allSelected}
+                  indeterminate={!selection.allSelected && selection.someSelected}
+                  label={
+                    selection.allSelected
+                      ? "Deselect all leads on this page"
+                      : "Select all leads on this page"
+                  }
+                  onToggle={selection.onToggleAll}
+                />
+              </TableHead>
+            ) : null}
             <TableHead className="w-[170px]">ID</TableHead>
             <TableHead className="w-[130px]">Lead ID</TableHead>
             <TableHead>Contact</TableHead>
@@ -76,6 +141,20 @@ export function LeadsTable({
                 className="cursor-pointer"
                 onClick={() => router.push(`/leads/${lead.id}`)}
               >
+                {selection ? (
+                  <TableCell onClick={(event) => event.stopPropagation()}>
+                    <SelectCheckbox
+                      checked={selection.isSelected(lead.id)}
+                      disabled={selection.rowsDisabled}
+                      label={
+                        selection.rowsDisabled
+                          ? "Covered by the all-filtered selection"
+                          : `Select lead ${lead.leadId}`
+                      }
+                      onToggle={() => selection.onToggleRow(lead.id)}
+                    />
+                  </TableCell>
+                ) : null}
                 <TableCell className="font-mono text-xs text-muted-foreground">
                   {lead.id}
                 </TableCell>

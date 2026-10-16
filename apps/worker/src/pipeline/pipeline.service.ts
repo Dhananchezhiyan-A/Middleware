@@ -5,8 +5,10 @@ import { getPrisma, type Prisma } from "@middleware/database";
 import { hmacSha256Hex } from "@middleware/shared";
 import {
   applyFieldMapping,
+  defaultMappedPayload,
   type MappingContext,
 } from "@middleware/integrations";
+import { validateCanonical } from "@middleware/validation";
 import type {
   CanonicalLead,
   FieldMappingField,
@@ -15,11 +17,7 @@ import type {
 import { QueueProducer } from "../queues/queue-producer";
 import { json, fromJson } from "../common/json";
 import { recordStage, withStage } from "./stage-events";
-import {
-  dedupHash,
-  normalizeCanonical,
-  validateCanonical,
-} from "./validate-normalize";
+import { dedupHash, normalizeCanonical } from "./validate-normalize";
 import {
   evaluateConditions,
   evaluateRouting,
@@ -27,7 +25,6 @@ import {
   type RoutingFallback,
   type RoutingRuleInput,
 } from "./conditions";
-import { defaultMappedPayload } from "./default-payload";
 
 /**
  * The lead processing pipeline: VALIDATION → NORMALIZATION → DEDUPLICATION →

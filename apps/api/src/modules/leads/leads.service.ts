@@ -10,6 +10,7 @@ import {
 import type { CursorPage, RequestActor } from "@middleware/types";
 import { AuditService } from "../../infra/audit.module";
 import { QueuesService } from "../../infra/redis.module";
+import { buildLeadFilterWhere } from "./lead-filters";
 
 interface LeadListQuery {
   cursor?: string | null;
@@ -21,6 +22,12 @@ interface LeadListQuery {
   q?: string;
   from?: string;
   to?: string;
+  /** Calendar date/time filters resolved server-side in APP_TIMEZONE. */
+  dateFrom?: string;
+  dateTo?: string;
+  timeFrom?: string;
+  timeTo?: string;
+  quickRange?: string;
   sort?: "receivedAt:asc" | "receivedAt:desc";
 }
 
@@ -44,40 +51,16 @@ export class LeadsService {
     const sort = SORT_FIELDS[query.sort ?? "receivedAt:desc"];
     const desc = (query.sort ?? "receivedAt:desc") === "receivedAt:desc";
 
-    const where: Record<string, unknown> = {};
-    if (query.status) where["status"] = query.status;
-    if (query.sourceId) where["sourceId"] = query.sourceId;
-    if (query.scoreMin !== undefined) where["score"] = { gte: query.scoreMin };
-
-    const range: Record<string, Date> = {};
-    if (query.from) range["gte"] = new Date(query.from);
-    if (query.to) range["lte"] = new Date(query.to);
-    if (Object.keys(range).length > 0) where["receivedAt"] = range;
-
-    if (query.destinationId) {
-      where["deliveries"] = { some: { destinationId: query.destinationId } };
-    }
-    if (query.q) {
-      const q = query.q.trim();
-      const asEmail = q.toLowerCase();
-      const asPhone = q.replace(/\D/g, "");
-      where["OR"] = [
-        { id: { contains: q } },
-        { leadId: q },
-        { canonicalData: { path: ["name", "full"], string_contains: q, mode: "insensitive" } },
-        { canonicalData: { path: ["name", "first"], string_contains: q, mode: "insensitive" } },
-        { canonicalData: { path: ["name", "last"], string_contains: q, mode: "insensitive" } },
-        { canonicalData: { path: ["email"], equals: asEmail } },
-        ...(asPhone.length >= 6 ? [{ canonicalData: { path: ["phone"], equals: q } }] : []),
-        { externalLeadId: q },
-      ];
-    }
+    // Filters only — `total` counts the ENTIRE filtered set, independent of
+    // the cursor, so the UI can show "850 matching" while paging.
+    const filterWhere = buildLeadFilterWhere(query);
+    const rowWhere: Record<string, unknown> = { ...filterWhere };
 
     if (cursor) {
       const decoded = decodeCursor<{ receivedAt: string; id: string }>(cursor);
       if (decoded) {
         const receivedAt = new Date(decoded.receivedAt);
-        where["AND"] = [
+        rowWhere["AND"] = [
           desc
             ? { receivedAt: { lt: receivedAt } }
             : { receivedAt: { gt: receivedAt } },
@@ -86,7 +69,7 @@ export class LeadsService {
     }
 
     const rows = await getPrisma().lead.findMany({
-      where: where as never,
+      where: rowWhere as never,
       orderBy: [{ ...sort }, { id: desc ? "desc" : "asc" }],
       take: limit + 1,
       include: {
@@ -102,7 +85,7 @@ export class LeadsService {
       hasMore && last
         ? encodeCursor({ receivedAt: last.receivedAt.toISOString(), id: last.id })
         : null;
-    const total = await getPrisma().lead.count({ where: where as never });
+    const total = await getPrisma().lead.count({ where: filterWhere as never });
 
     return { items, nextCursor, total };
   }

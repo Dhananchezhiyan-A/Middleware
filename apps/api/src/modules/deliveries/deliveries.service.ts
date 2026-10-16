@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { getPrisma } from "@middleware/database";
 import { decodeCursor, encodeCursor, errors, normalizeQuery } from "@middleware/shared";
+import { idSchema } from "@middleware/validation";
 import type { CursorPage, RequestActor } from "@middleware/types";
 import { AuditService } from "../../infra/audit.module";
 import { QueuesService } from "../../infra/redis.module";
@@ -11,6 +12,7 @@ interface DeliveryListQuery {
   status?: string;
   destinationId?: string;
   leadId?: string;
+  correlationId?: string;
   from?: string;
   to?: string;
 }
@@ -35,6 +37,7 @@ export class DeliveriesService {
     if (query.status) where["status"] = query.status;
     if (query.destinationId) where["destinationId"] = query.destinationId;
     if (query.leadId) where["leadId"] = query.leadId;
+    if (query.correlationId) where["correlationId"] = query.correlationId;
     const range: Record<string, Date> = {};
     if (query.from) range["gte"] = new Date(query.from);
     if (query.to) range["lte"] = new Date(query.to);
@@ -63,6 +66,61 @@ export class DeliveriesService {
       hasMore && last ? encodeCursor({ updatedAt: last.updatedAt.toISOString(), id: last.id }) : null;
     const total = await prisma.delivery.count({ where: where as never });
     return { items, nextCursor, total };
+  }
+
+  /**
+   * Live status counts for one operation's deliveries (`?correlationId=` of a
+   * manual send) — how the UI distinguishes queued jobs from real successes.
+   */
+  async stats(correlationId: string) {
+    if (!idSchema.safeParse(correlationId).success) {
+      throw errors.validation("Invalid correlation id.");
+    }
+    const prisma = getPrisma();
+    const rows = await prisma.delivery.groupBy({
+      by: ["destinationId", "status"],
+      where: { correlationId },
+      _count: { _all: true },
+    });
+
+    const empty = (): Record<string, number> => ({
+      PENDING: 0,
+      QUEUED: 0,
+      IN_PROGRESS: 0,
+      SUCCEEDED: 0,
+      FAILED: 0,
+      DEAD: 0,
+      SKIPPED: 0,
+    });
+    const byStatus = empty();
+    const perDestination = new Map<string, Record<string, number>>();
+    let total = 0;
+    for (const row of rows) {
+      byStatus[row.status] += row._count._all;
+      total += row._count._all;
+      const bucket = perDestination.get(row.destinationId) ?? empty();
+      bucket[row.status] += row._count._all;
+      perDestination.set(row.destinationId, bucket);
+    }
+
+    const destinationIds = [...perDestination.keys()];
+    const destinations =
+      destinationIds.length > 0
+        ? await prisma.destination.findMany({
+            where: { id: { in: destinationIds } },
+            select: { id: true, name: true, type: true },
+          })
+        : [];
+
+    return {
+      correlationId,
+      total,
+      byStatus,
+      destinations: destinations.map((d) => ({
+        ...d,
+        byStatus: perDestination.get(d.id) ?? empty(),
+      })),
+    };
   }
 
   async getDetail(id: string) {

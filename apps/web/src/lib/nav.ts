@@ -103,6 +103,7 @@ export const NAV_SECTIONS: NavSection[] = [
 export const SEGMENT_LABELS: Record<string, string> = {
   dashboard: "Dashboard",
   leads: "Leads",
+  import: "Import CSV",
   processing: "Processing",
   delivered: "Delivered",
   failed: "Failed",

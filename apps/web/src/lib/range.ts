@@ -1,4 +1,13 @@
 import { LeadStatuses } from "@middleware/types";
+import {
+  HH_MM_RE,
+  ISO_DATE_RE,
+  QUICK_RANGES,
+  QUICK_RANGE_LABELS,
+  type QuickRange,
+} from "@middleware/validation";
+
+export { QUICK_RANGE_LABELS };
 
 /**
  * Dashboard drill-down ranges.
@@ -48,6 +57,16 @@ export interface ListFilterParams {
   status?: string;
   sourceId?: string;
   q?: string;
+  /**
+   * Server-interpreted receivedAt filters (resolved in APP_TIMEZONE):
+   * calendar dates (YYYY-MM-DD), optional times (HH:MM) and/or a quick range
+   * token. Mutually exclusive with the legacy `from`/`to` instants.
+   */
+  dateFrom?: string;
+  timeFrom?: string;
+  dateTo?: string;
+  timeTo?: string;
+  quickRange?: QuickRange;
 }
 
 /**
@@ -84,7 +103,27 @@ export function readListFilterParams(
   const to = first(searchParams.to);
   if (to) out.to = to;
 
-  if (out.range && !out.from && !out.to) {
+  // Server-interpreted calendar filters (ignored when malformed — a
+  // hand-edited URL can never produce a broken query).
+  const dateFrom = first(searchParams.dateFrom);
+  if (dateFrom && ISO_DATE_RE.test(dateFrom)) out.dateFrom = dateFrom;
+  const dateTo = first(searchParams.dateTo);
+  if (dateTo && ISO_DATE_RE.test(dateTo)) out.dateTo = dateTo;
+  const timeFrom = first(searchParams.timeFrom);
+  if (timeFrom && HH_MM_RE.test(timeFrom)) out.timeFrom = timeFrom;
+  const timeTo = first(searchParams.timeTo);
+  if (timeTo && HH_MM_RE.test(timeTo)) out.timeTo = timeTo;
+  const quickRange = first(searchParams.quickRange);
+  if (quickRange && QUICK_RANGES.includes(quickRange as QuickRange)) {
+    out.quickRange = quickRange as QuickRange;
+  }
+
+  // The rolling drill-down `range` only applies when no explicit receivedAt
+  // filter (either flavour) was given.
+  const hasReceivedFilters = Boolean(
+    out.from || out.to || out.dateFrom || out.dateTo || out.quickRange,
+  );
+  if (out.range && !hasReceivedFilters) {
     const bounds = rangeToFromTo(out.range);
     out.from = bounds.from;
     out.to = bounds.to;

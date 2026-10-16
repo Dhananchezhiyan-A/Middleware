@@ -13,6 +13,7 @@ import {
   type ReplayDeliveryJob,
 } from "@middleware/types";
 import { errors, redisConnectionOptions, getContext, withTimeout } from "@middleware/shared";
+import { LeadSelectionStore } from "./selection.store";
 
 /**
  * Queue access for the API (producer side) + queue health statistics.
@@ -263,7 +264,7 @@ export class QueuesService implements OnModuleDestroy {
 
 @Global()
 @Module({
-  providers: [QueuesService],
-  exports: [QueuesService],
+  providers: [QueuesService, LeadSelectionStore],
+  exports: [QueuesService, LeadSelectionStore],
 })
 export class RedisModule {}

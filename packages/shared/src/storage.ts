@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, type ReadStream } from "node:fs";
 import { readFile, unlink, writeFile } from "node:fs/promises";
-import { isAbsolute, join, normalize, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 
 /**
  * Storage abstraction for uploaded files (CSV imports, error reports).
@@ -51,6 +51,10 @@ export class LocalStorageDriver implements StorageDriver {
       opts.checksum ?? createHash("sha256").update(buffer).digest("hex");
     const key = `${sanitizeFileName(opts.prefix)}/${checksum.slice(0, 32)}-${randomBytes(6).toString("hex")}.csv`;
     const full = this.getPath(key);
+    // The prefix directory (e.g. `imports/`) may not exist yet on a fresh
+    // install — create it, otherwise the very first upload fails.
+    const dir = dirname(full);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     await writeFile(full, buffer);
     return { key, size: buffer.length, contentType: opts.contentType };
   }

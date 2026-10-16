@@ -88,6 +88,12 @@ export async function cleanupFixture(fx: Fixture, db: Database = getPrisma()): P
     select: { id: true },
   });
   const deliveryIds = deliveries.map((r) => r.id);
+  // CSV imports hang off the same fixture graph (ImportJob.sourceId/sourceAccountId).
+  const importJobs = await db.importJob.findMany({
+    where: { OR: [{ sourceId: { in: sourceIds } }, { sourceAccountId: { in: accountIds } }] },
+    select: { id: true },
+  });
+  const importJobIds = importJobs.map((r) => r.id);
   const rules = await db.routingRule.findMany({
     where: { name: { contains: RUN } },
     select: { id: true },
@@ -100,17 +106,30 @@ export async function cleanupFixture(fx: Fixture, db: Database = getPrisma()): P
   const userIds = users.map((r) => r.id);
 
   // --- children first (never depend on cascade ordering) --------------------
-  await db.deliveryAttempt.deleteMany({ where: { deliveryId: { in: deliveryIds } } });
   await db.auditLog.deleteMany({
     where: {
       OR: [
-        { entityId: { in: [...leadIds, ...deliveryIds, ...sourceIds, ...accountIds, ...destinationIds] } },
+        {
+          entityId: {
+            in: [
+              ...leadIds,
+              ...deliveryIds,
+              ...sourceIds,
+              ...accountIds,
+              ...destinationIds,
+              ...importJobIds,
+            ],
+          },
+        },
         { actorId: { in: userIds } },
         // Test-only actions written by audit.test.ts (never produced by the app).
         { action: { in: ["test.action", "secret.test", "append.test"] } },
       ],
     },
   });
+  await db.importRowError.deleteMany({ where: { importJobId: { in: importJobIds } } });
+  await db.importJob.deleteMany({ where: { id: { in: importJobIds } } });
+  await db.deliveryAttempt.deleteMany({ where: { deliveryId: { in: deliveryIds } } });
   await db.delivery.deleteMany({ where: { id: { in: deliveryIds } } });
   await db.leadStageEvent.deleteMany({ where: { leadId: { in: leadIds } } });
   await db.leadScore.deleteMany({ where: { leadId: { in: leadIds } } });

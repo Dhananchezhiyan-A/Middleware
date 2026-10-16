@@ -3,14 +3,22 @@ import type { Job } from "bullmq";
 import { UnrecoverableError } from "bullmq";
 import { getPrisma } from "@middleware/database";
 import { getStorage, sha256Hex } from "@middleware/shared";
-import type { ImportCsvJob } from "@middleware/types";
+import {
+  CSV_MAX_COLUMNS,
+  CSV_MAX_ROWS,
+  duplicateHeaders,
+  parseCsv,
+  recordToCanonical,
+  toRecords,
+  validateCanonical,
+} from "@middleware/validation";
+import { findLeadField, type CsvColumnMapping, type ImportCsvJob } from "@middleware/types";
 import { json } from "../common/json";
-import { parseCsv, recordToCanonical, toRecords } from "../pipeline/csv";
+// Value import (not `import type`): emitDecoratorMetadata needs the runtime
+// class to build the constructor's design:paramtypes for Nest DI.
 import { QueueProducer } from "../queues/queue-producer";
 
-/** Hard cap: a malformed/hostile upload can never exhaust the database. */
-const MAX_ROWS = 100_000;
-const MAX_COLUMNS = 200;
+/** Rows are written to PostgreSQL in bounded batches (never held in memory). */
 const PROGRESS_EVERY = 100;
 
 /**
@@ -18,11 +26,16 @@ const PROGRESS_EVERY = 100;
  *
  * Data safety:
  *  - Idempotent: each row gets a deterministic externalLeadId derived from
- *    (importJobId, rowNumber) — a retried import job can never double-create
- *    a lead (DB unique constraint), rows already present count as duplicates.
- *  - Bad rows are isolated as ImportRowError entries; one bad row never
- *    aborts the import.
+ *    (file checksum + column mapping + row number). A retried job can never
+ *    double-create a lead, and re-uploading the SAME file reports every row
+ *    as a duplicate instead of silently creating copies. Rows that failed on
+ *    a previous run have no lead, so they are retried.
+ *  - Rows are validated with the SAME rule set the upload UI previewed
+ *    (`validateCanonical`); failures are isolated as ImportRowError entries
+ *    with the file row number — one bad row never aborts the import.
  *  - Counters are real, periodically flushed so the UI progress is truthful.
+ *    `processedRows` counts rows ATTEMPTED; the report's "skipped" count is
+ *    `totalRows - processedRows` (rows without any data).
  */
 @Injectable()
 export class CsvImportProcessor {
@@ -47,6 +60,12 @@ export class CsvImportProcessor {
       throw new UnrecoverableError(`Import ${importJobId} has no source/account`);
     }
 
+    const mapping = this.readMapping(job.data.mapping);
+    if (mapping === null) {
+      await this.fail(importJobId, "Import carries an invalid column mapping.");
+      throw new UnrecoverableError(`Import ${importJobId}: invalid column mapping`);
+    }
+
     await db.importJob.update({
       where: { id: importJobId },
       data: { status: "PARSING", startedAt: importJob.startedAt ?? new Date() },
@@ -67,19 +86,33 @@ export class CsvImportProcessor {
       await this.fail(importJobId, "CSV contains no parsable data rows.");
       throw new UnrecoverableError(`Import ${importJobId}: no data rows`);
     }
-    if (table.records.length > MAX_ROWS) {
-      await this.fail(importJobId, `CSV exceeds the ${MAX_ROWS}-row limit.`);
+    if (table.dataRows > CSV_MAX_ROWS) {
+      await this.fail(importJobId, `CSV exceeds the ${CSV_MAX_ROWS}-row limit.`);
       throw new UnrecoverableError(`Import ${importJobId}: row limit exceeded`);
     }
-    if (table.headers.length > MAX_COLUMNS) {
-      await this.fail(importJobId, `CSV exceeds the ${MAX_COLUMNS}-column limit.`);
+    if (table.headers.length > CSV_MAX_COLUMNS) {
+      await this.fail(importJobId, `CSV exceeds the ${CSV_MAX_COLUMNS}-column limit.`);
       throw new UnrecoverableError(`Import ${importJobId}: column limit exceeded`);
+    }
+    const dupes = duplicateHeaders(table.headers);
+    if (dupes.length > 0) {
+      await this.fail(importJobId, `CSV has duplicate columns: ${dupes.join(", ")}.`);
+      throw new UnrecoverableError(`Import ${importJobId}: duplicate columns`);
     }
 
     await db.importJob.update({
       where: { id: importJobId },
-      data: { status: "PROCESSING", totalRows: table.records.length },
+      data: { status: "PROCESSING", totalRows: table.dataRows },
     });
+
+    /**
+     * Import identity: identical file + identical mapping + identical target
+     * account produce the SAME externalLeadId per row, so an accidental
+     * re-upload cannot create a second copy of every lead (P2002 → duplicate).
+     */
+    const importKey = sha256Hex(
+      `${importJob.sourceAccountId}:${importJob.checksum}:${JSON.stringify(mapping ?? [])}`,
+    ).slice(0, 40);
 
     let processed = 0;
     let successful = 0;
@@ -88,52 +121,56 @@ export class CsvImportProcessor {
 
     for (let i = 0; i < table.records.length; i++) {
       const record = table.records[i] as Record<string, string>;
-      const rowNumber = i + 2; // row 1 is the header
-      try {
-        const canonical = recordToCanonical(record);
-        const lead = await db.lead.create({
-          data: {
-            sourceId: importJob.sourceId,
-            sourceAccountId: importJob.sourceAccountId,
-            externalLeadId: `csv:${importJobId}:${rowNumber}`,
-            status: "RECEIVED",
-            stage: "RECEIVED",
-            canonicalData: json(canonical),
-            correlationId,
-          },
-        });
-        await db.leadRawPayload.create({
-          data: {
+      // Physical file row number (header = 1), shared with the upload preview.
+      const rowNumber = table.rowNumbers[i] ?? i + 2;
+      const canonical = recordToCanonical(record, mapping);
+      const validation = validateCanonical(canonical);
+
+      if (!validation.ok) {
+        // Never create a lead we already know the pipeline would reject —
+        // the row is reported instead, with its row number and reasons.
+        failed += 1;
+        await this.recordRowError(
+          importJobId,
+          rowNumber,
+          record,
+          `Validation: ${validation.errors.join(" ")}`,
+        );
+      } else {
+        try {
+          const lead = await db.lead.create({
+            data: {
+              sourceId: importJob.sourceId,
+              sourceAccountId: importJob.sourceAccountId,
+              externalLeadId: `csv:${importKey}:${rowNumber}`,
+              status: "RECEIVED",
+              stage: "RECEIVED",
+              canonicalData: json(canonical),
+              correlationId,
+            },
+          });
+          await db.leadRawPayload.create({
+            data: {
+              leadId: lead.id,
+              sourceAccountId: importJob.sourceAccountId,
+              payload: json(record),
+              contentType: "text/csv",
+              checksum: sha256Hex(JSON.stringify(record)),
+            },
+          });
+          await this.queues.enqueueIntake({
             leadId: lead.id,
-            sourceAccountId: importJob.sourceAccountId,
-            payload: json(record),
-            contentType: "text/csv",
-            checksum: sha256Hex(JSON.stringify(record)),
-          },
-        });
-        await this.queues.enqueueIntake({
-          leadId: lead.id,
-          correlationId,
-        });
-        successful += 1;
-      } catch (err) {
-        const code = (err as { code?: string }).code;
-        if (code === "P2002") {
-          duplicates += 1; // Row already created by a previous attempt — idempotent.
-        } else {
-          failed += 1;
-          const message = err instanceof Error ? err.message : String(err);
-          try {
-            await db.importRowError.create({
-              data: {
-                importJobId,
-                rowNumber,
-                rawRow: json(record),
-                error: message.slice(0, 1000),
-              },
-            });
-          } catch (rowErr) {
-            this.logger.error(`Could not record row error ${rowNumber}: ${String(rowErr)}`);
+            correlationId,
+          });
+          successful += 1;
+        } catch (err) {
+          const code = (err as { code?: string }).code;
+          if (code === "P2002") {
+            duplicates += 1; // Row already present (retry or identical re-upload).
+          } else {
+            failed += 1;
+            const message = err instanceof Error ? err.message : String(err);
+            await this.recordRowError(importJobId, rowNumber, record, message);
           }
         }
       }
@@ -147,6 +184,7 @@ export class CsvImportProcessor {
       }
     }
 
+    const skipped = Math.max(0, table.dataRows - processed);
     await db.importJob.update({
       where: { id: importJobId },
       data: {
@@ -167,12 +205,53 @@ export class CsvImportProcessor {
         entityType: "ImportJob",
         entityId: importJobId,
         correlationId,
-        metadata: json({ processed, successful, failed, duplicates }),
+        metadata: json({ processed, successful, failed, duplicates, skipped }),
       },
     });
     this.logger.log(
-      `Import ${importJobId} completed: ${successful} created, ${duplicates} duplicate, ${failed} failed.`,
+      `Import ${importJobId} completed: ${successful} created, ${skipped} skipped, ${duplicates} duplicate, ${failed} failed.`,
     );
+  }
+
+  /**
+   * Validates the mapping payload before any row is touched. Returns null
+   * when it is unusable (unknown field target), [] when no mapping was sent
+   * (header-alias detection, the pre-mapping behaviour).
+   */
+  private readMapping(raw: CsvColumnMapping[] | undefined): CsvColumnMapping[] | null {
+    if (!raw) return [];
+    if (!Array.isArray(raw)) return null;
+    const seen = new Set<string>();
+    for (const entry of raw) {
+      if (typeof entry?.column !== "string" || typeof entry?.target !== "string") return null;
+      if (entry.column.trim() === "" || entry.column.length > 255) return null;
+      if (entry.target !== "" && !entry.target.startsWith("custom.") && !findLeadField(entry.target)) {
+        return null;
+      }
+      if (entry.target !== "" && seen.has(entry.target)) return null; // one column per field
+      if (entry.target !== "") seen.add(entry.target);
+    }
+    return raw;
+  }
+
+  private async recordRowError(
+    importJobId: string,
+    rowNumber: number,
+    record: Record<string, string>,
+    message: string,
+  ): Promise<void> {
+    try {
+      await getPrisma().importRowError.create({
+        data: {
+          importJobId,
+          rowNumber,
+          rawRow: json(record),
+          error: message.slice(0, 1000),
+        },
+      });
+    } catch (rowErr) {
+      this.logger.error(`Could not record row error ${rowNumber}: ${String(rowErr)}`);
+    }
   }
 
   private async fail(importJobId: string, reason: string): Promise<void> {

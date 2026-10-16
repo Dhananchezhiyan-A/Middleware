@@ -16,6 +16,13 @@ export const queryKeys = {
     audit: (id: string) => ["leads", "audit", id] as const,
   },
 
+  imports: {
+    all: ["imports"] as const,
+    list: (params: unknown) => ["imports", "list", params] as const,
+    detail: (id: string) => ["imports", "detail", id] as const,
+    rowErrors: (id: string) => ["imports", "row-errors", id] as const,
+  },
+
   sources: {
     all: ["sources"] as const,
     list: ["sources", "list"] as const,
@@ -53,6 +60,7 @@ export const queryKeys = {
     list: (params: unknown) => ["deliveries", "list", params] as const,
     detail: (id: string) => ["deliveries", "detail", id] as const,
     queueStats: ["deliveries", "queue-stats"] as const,
+    stats: (correlationId: string) => ["deliveries", "stats", correlationId] as const,
     failed: (queue: string) => ["deliveries", "failed", queue] as const,
     deadLetter: (queue: string) => ["deliveries", "dead-letter", queue] as const,
   },

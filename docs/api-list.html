@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lead Middleware — Full API List</title>
+<style>
+  @page { size: A4; margin: 16mm 12mm 16mm 12mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", Arial, Helvetica, sans-serif; font-size: 9.5px; color: #1a1d24; margin: 0; line-height: 1.45; }
+  h1 { font-size: 24px; margin: 0 0 4px; color: #11141c; }
+  .sub { color: #5a6172; font-size: 11px; margin-bottom: 14px; }
+  h2 { font-size: 14px; margin: 22px 0 8px; padding: 6px 10px; background: #1e2230; color: #fff; border-radius: 5px; page-break-after: avoid; }
+  h3 { font-size: 12px; margin: 16px 0 6px; color: #2c3242; page-break-after: avoid; }
+  .meta { display: flex; gap: 18px; flex-wrap: wrap; background: #f2f4f9; border: 1px solid #d8dce8; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; }
+  .meta div { font-size: 10px; }
+  .meta b { display: block; font-size: 9px; text-transform: uppercase; letter-spacing: .5px; color: #5a6172; }
+  table { width: 100%; border-collapse: collapse; page-break-inside: auto; margin-bottom: 10px; }
+  thead { display: table-header-group; }
+  tr { page-break-inside: avoid; }
+  th { background: #eceff6; border: 1px solid #d3d8e6; padding: 5px 7px; text-align: left; font-size: 9px; text-transform: uppercase; letter-spacing: .4px; color: #474e60; }
+  td { border: 1px solid #dde1ec; padding: 5px 7px; vertical-align: top; }
+  td.n { width: 26px; color: #8a90a3; text-align: right; font-size: 9px; }
+  td.path { font-family: Consolas, "Courier New", monospace; font-size: 9.5px; white-space: nowrap; }
+  td.desc { color: #33384a; }
+  .perm { font-family: Consolas, "Courier New", monospace; font-size: 9px; white-space: nowrap; color: #3b4256; }
+  .m { display: inline-block; min-width: 46px; padding: 1px 5px; border-radius: 3px; font-family: Consolas, monospace; font-size: 8.5px; font-weight: 700; text-align: center; color: #fff; }
+  .GET { background: #1a7f4e; } .POST { background: #1f5fbf; } .PATCH { background: #b06a12; }
+  .PUT { background: #7048b6; } .DELETE { background: #c0392b; }
+  .pub { background: #6b7280; }
+  .badge { display: inline-block; background: #eaf3ec; border: 1px solid #b9d8c3; color: #1a7f4e; border-radius: 3px; padding: 0 4px; font-size: 8.5px; font-family: Consolas, monospace; }
+  .legend { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 2px; align-items: center; font-size: 9px; color: #5a6172; }
+  ul { margin: 4px 0 8px 18px; padding: 0; }
+  li { margin-bottom: 2px; }
+  .note { background: #fff8e6; border: 1px solid #eadfb5; border-radius: 5px; padding: 8px 12px; font-size: 9.5px; margin: 8px 0 14px; }
+  .count { float: right; font-size: 11px; font-weight: 600; color: #6b7280; margin-top: 22px; }
+  code { font-family: Consolas, monospace; background: #f0f2f8; border: 1px solid #dfe3ee; border-radius: 3px; padding: 0 3px; font-size: 9px; }
+  .footer { margin-top: 18px; padding-top: 8px; border-top: 1px solid #d8dce8; color: #8a90a3; font-size: 9px; }
+</style>
+</head>
+<body>
+
+<h1>Lead Integration &amp; Distribution Middleware — Full API List</h1>
+<div class="sub">All HTTP endpoints exposed by the NestJS API · source: <code>apps/api/src/modules/**/*.controller.ts</code> · 84 endpoints in 16 controllers</div>
+
+<div class="meta">
+  <div><b>Base URL</b><code>http://localhost:4000/api/v1</code></div>
+  <div><b>Versioning</b>URI (<code>/api/v1</code> prefix)</div>
+  <div><b>Auth</b>Bearer JWT (900 s) or <code>x-api-key</code></div>
+  <div><b>Envelope</b><code>{ success, data | error }</code></div>
+  <div><b>Pagination</b>cursor + limit (default 25, max 100)</div>
+  <div><b>Status codes</b>POST → 201, others → 200</div>
+</div>
+
+<div class="note">
+  <b>Notes.</b> The CSV error download (<code>GET /imports/:id/errors</code>) is the only endpoint that bypasses the response envelope (<code>@SkipTransform</code>, returns <code>text/csv</code>).
+  Public routes (marked <span class="badge">public</span>) need no token. Permissions are re-loaded from the role on every request; UI visibility is UX-only — the API enforces every permission.
+  Rate limits: 300 req/min global, 20/min on login/refresh, 600/min on inbound webhooks.
+</div>
+
+<div class="legend">
+  <b>Legend:</b>
+  <span class="m GET">GET</span> read
+  <span class="m POST">POST</span> create / action
+  <span class="m PUT">PUT</span> replace
+  <span class="m PATCH">PATCH</span> update
+  <span class="m DELETE">DELETE</span> remove
+  <span class="badge">public</span> unauthenticated
+</div>
+
+<h2>1. Health</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">1</td><td><span class="m GET">GET</span></td><td class="path">/health</td><td><span class="badge">public</span></td><td class="desc">Liveness/readiness probe with real dependency checks (Postgres <code>SELECT 1</code>, Redis PING)</td></tr>
+</tbody></table>
+
+<h2>2. Authentication</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">2</td><td><span class="m POST">POST</span></td><td class="path">/auth/login</td><td><span class="badge">public</span></td><td class="desc">Exchange credentials for access + refresh tokens (rate-limited, audited)</td></tr>
+<tr><td class="n">3</td><td><span class="m POST">POST</span></td><td class="path">/auth/refresh</td><td><span class="badge">public</span></td><td class="desc">Rotate the refresh token and mint a new access token (reuse detection revokes all sessions)</td></tr>
+<tr><td class="n">4</td><td><span class="m POST">POST</span></td><td class="path">/auth/logout</td><td><span class="badge">public</span></td><td class="desc">Revoke the current session (refresh token rotation guard)</td></tr>
+<tr><td class="n">5</td><td><span class="m GET">GET</span></td><td class="path">/auth/me</td><td class="perm">authenticated</td><td class="desc">Current user, role and permissions</td></tr>
+</tbody></table>
+
+<h2>3. Users</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">6</td><td><span class="m GET">GET</span></td><td class="path">/users</td><td class="perm">users:read</td><td class="desc">List users (cursor paginated)</td></tr>
+<tr><td class="n">7</td><td><span class="m POST">POST</span></td><td class="path">/users</td><td class="perm">users:write</td><td class="desc">Create a user (bcrypt cost 12, audited)</td></tr>
+<tr><td class="n">8</td><td><span class="m PATCH">PATCH</span></td><td class="path">/users/:id</td><td class="perm">users:write</td><td class="desc">Update a user's name, role or status</td></tr>
+</tbody></table>
+
+<h2>4. Roles</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">9</td><td><span class="m GET">GET</span></td><td class="path">/roles</td><td class="perm">roles:read</td><td class="desc">List application roles (with user counts)</td></tr>
+<tr><td class="n">10</td><td><span class="m GET">GET</span></td><td class="path">/roles/permissions</td><td class="perm">roles:read</td><td class="desc">Static permission catalog and role templates (fixed reference data)</td></tr>
+<tr><td class="n">11</td><td><span class="m POST">POST</span></td><td class="path">/roles</td><td class="perm">roles:write</td><td class="desc">Create a custom role</td></tr>
+<tr><td class="n">12</td><td><span class="m PATCH">PATCH</span></td><td class="path">/roles/:id</td><td class="perm">roles:write</td><td class="desc">Update a custom role (system roles are immutable)</td></tr>
+<tr><td class="n">13</td><td><span class="m DELETE">DELETE</span></td><td class="path">/roles/:id</td><td class="perm">roles:write</td><td class="desc">Delete a custom role (fails while users are assigned)</td></tr>
+</tbody></table>
+
+<h2>5. API Keys</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">14</td><td><span class="m GET">GET</span></td><td class="path">/api-keys</td><td class="perm">apikeys:read</td><td class="desc">List API keys (never exposes the key or its hash)</td></tr>
+<tr><td class="n">15</td><td><span class="m POST">POST</span></td><td class="path">/api-keys</td><td class="perm">apikeys:write</td><td class="desc">Create an API key — the raw key is returned only once</td></tr>
+<tr><td class="n">16</td><td><span class="m DELETE">DELETE</span></td><td class="path">/api-keys/:id</td><td class="perm">apikeys:write</td><td class="desc">Revoke an API key (idempotent)</td></tr>
+</tbody></table>
+
+<h2>6. Sources (lead sources &amp; inbound accounts)</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">17</td><td><span class="m GET">GET</span></td><td class="path">/sources</td><td class="perm">sources:read</td><td class="desc">List lead sources with account/lead counts</td></tr>
+<tr><td class="n">18</td><td><span class="m POST">POST</span></td><td class="path">/sources</td><td class="perm">sources:write</td><td class="desc">Create a lead source</td></tr>
+<tr><td class="n">19</td><td><span class="m GET">GET</span></td><td class="path">/sources/:id</td><td class="perm">sources:read</td><td class="desc">Source detail with its inbound accounts</td></tr>
+<tr><td class="n">20</td><td><span class="m PATCH">PATCH</span></td><td class="path">/sources/:id</td><td class="perm">sources:write</td><td class="desc">Update a lead source</td></tr>
+<tr><td class="n">21</td><td><span class="m DELETE">DELETE</span></td><td class="path">/sources/:id</td><td class="perm">sources:write</td><td class="desc">Delete a source (blocked while leads exist)</td></tr>
+<tr><td class="n">22</td><td><span class="m GET">GET</span></td><td class="path">/sources/:id/accounts</td><td class="perm">sources:read</td><td class="desc">List inbound accounts (with webhook URLs)</td></tr>
+<tr><td class="n">23</td><td><span class="m POST">POST</span></td><td class="path">/sources/:id/accounts</td><td class="perm">sources:write</td><td class="desc">Create an inbound account and public webhook URL</td></tr>
+<tr><td class="n">24</td><td><span class="m PATCH">PATCH</span></td><td class="path">/sources/accounts/:accountId</td><td class="perm">sources:write</td><td class="desc">Update an inbound account</td></tr>
+<tr><td class="n">25</td><td><span class="m DELETE">DELETE</span></td><td class="path">/sources/accounts/:accountId</td><td class="perm">sources:write</td><td class="desc">Delete an inbound account (blocked while leads exist)</td></tr>
+<tr><td class="n">26</td><td><span class="m POST">POST</span></td><td class="path">/sources/accounts/:accountId/rotate-secret</td><td class="perm">sources:write</td><td class="desc">Rotate the webhook signing secret (returned ONCE)</td></tr>
+</tbody></table>
+
+<h2>7. Destinations (CRM / endpoints)</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">27</td><td><span class="m GET">GET</span></td><td class="path">/destinations/types</td><td class="perm">destinations:read</td><td class="desc">Supported destination types + required config keys (from adapters)</td></tr>
+<tr><td class="n">28</td><td><span class="m GET">GET</span></td><td class="path">/destinations</td><td class="perm">destinations:read</td><td class="desc">List destinations with health and delivery counts</td></tr>
+<tr><td class="n">29</td><td><span class="m POST">POST</span></td><td class="path">/destinations</td><td class="perm">destinations:write</td><td class="desc">Create a destination</td></tr>
+<tr><td class="n">30</td><td><span class="m GET">GET</span></td><td class="path">/destinations/:id</td><td class="perm">destinations:read</td><td class="desc">Destination detail (credential metadata only, never the secret)</td></tr>
+<tr><td class="n">31</td><td><span class="m PATCH">PATCH</span></td><td class="path">/destinations/:id</td><td class="perm">destinations:write</td><td class="desc">Update a destination</td></tr>
+<tr><td class="n">32</td><td><span class="m DELETE">DELETE</span></td><td class="path">/destinations/:id</td><td class="perm">destinations:write</td><td class="desc">Delete a destination (blocked while deliveries exist)</td></tr>
+<tr><td class="n">33</td><td><span class="m PUT">PUT</span></td><td class="path">/destinations/:id/credential</td><td class="perm">destinations:write</td><td class="desc">Set/replace the destination credential (write-only; never returned)</td></tr>
+<tr><td class="n">34</td><td><span class="m DELETE">DELETE</span></td><td class="path">/destinations/:id/credential</td><td class="perm">destinations:write</td><td class="desc">Remove the destination credential</td></tr>
+<tr><td class="n">35</td><td><span class="m GET">GET</span></td><td class="path">/destinations/:id/health</td><td class="perm">destinations:read</td><td class="desc">Last known destination health (real probe results)</td></tr>
+<tr><td class="n">36</td><td><span class="m POST">POST</span></td><td class="path">/destinations/:id/test</td><td class="perm">destinations:test</td><td class="desc">Run a REAL connectivity/auth probe against the destination</td></tr>
+</tbody></table>
+
+<h2>8. Webhooks (inbound)</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">37</td><td><span class="m POST">POST</span></td><td class="path">/webhooks/inbound/:publicId</td><td><span class="badge">public</span></td><td class="desc">Inbound lead webhook (idempotent, fast-ack; rate-limited 600/min)</td></tr>
+<tr><td class="n">38</td><td><span class="m GET">GET</span></td><td class="path">/webhooks/events</td><td class="perm">sources:read</td><td class="desc">Inbound webhook event log (status, duplicates, errors)</td></tr>
+<tr><td class="n">39</td><td><span class="m GET">GET</span></td><td class="path">/webhooks/events/:id</td><td class="perm">sources:read</td><td class="desc">Webhook event detail (sanitized payload)</td></tr>
+</tbody></table>
+
+<h2>9. Leads</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">40</td><td><span class="m GET">GET</span></td><td class="path">/leads</td><td class="perm">leads:read</td><td class="desc">List leads (cursor pagination, filters, exact-match search, filtered <code>total</code>, server-side date/time ranges in APP_TIMEZONE)</td></tr>
+<tr><td class="n">41</td><td><span class="m POST">POST</span></td><td class="path">/leads</td><td class="perm">leads:write</td><td class="desc">Create a lead manually (enqueued for processing; 409 on duplicate external id)</td></tr>
+<tr><td class="n">42</td><td><span class="m POST">POST</span></td><td class="path">/leads/selection</td><td class="perm">leads:read</td><td class="desc">Resolve every lead matching the filters into an expiring server-side selection token (≤ LEAD_SELECTION_MAX)</td></tr>
+<tr><td class="n">43</td><td><span class="m POST">POST</span></td><td class="path">/leads/manual-send/preview</td><td class="perm">leads:replay</td><td class="desc">Authoritative eligibility counts before a manual send (combinations, skipped, limits)</td></tr>
+<tr><td class="n">44</td><td><span class="m POST">POST</span></td><td class="path">/leads/manual-send</td><td class="perm">leads:replay</td><td class="desc">Queue deliveries for the selected leads (bounded batches, audited, idempotent)</td></tr>
+<tr><td class="n">45</td><td><span class="m GET">GET</span></td><td class="path">/leads/:id</td><td class="perm">leads:read</td><td class="desc">Lead detail with processing, scores and deliveries</td></tr>
+<tr><td class="n">46</td><td><span class="m GET">GET</span></td><td class="path">/leads/:id/timeline</td><td class="perm">leads:read</td><td class="desc">Immutable pipeline timeline (stage events, scores, routing)</td></tr>
+<tr><td class="n">47</td><td><span class="m GET">GET</span></td><td class="path">/leads/:id/payloads</td><td class="perm">leads:read</td><td class="desc">Raw inbound payloads + canonical data</td></tr>
+<tr><td class="n">48</td><td><span class="m POST">POST</span></td><td class="path">/leads/:id/replay</td><td class="perm">leads:replay</td><td class="desc">Re-run the processing pipeline for a lead (audited)</td></tr>
+<tr><td class="n">49</td><td><span class="m DELETE">DELETE</span></td><td class="path">/leads/:id</td><td class="perm">leads:delete</td><td class="desc">Delete a lead and its processing history (audited with before-snapshot)</td></tr>
+</tbody></table>
+
+<h2>10. Routing Rules</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">50</td><td><span class="m GET">GET</span></td><td class="path">/routing-rules</td><td class="perm">routing:read</td><td class="desc">List routing rules ordered by priority</td></tr>
+<tr><td class="n">51</td><td><span class="m POST">POST</span></td><td class="path">/routing-rules</td><td class="perm">routing:write</td><td class="desc">Create a routing rule with its ordered destinations</td></tr>
+<tr><td class="n">52</td><td><span class="m POST">POST</span></td><td class="path">/routing-rules/preview</td><td class="perm">routing:read</td><td class="desc">Dry-run rule evaluation for a sample lead (same engine as the worker; nothing persisted)</td></tr>
+<tr><td class="n">53</td><td><span class="m PATCH">PATCH</span></td><td class="path">/routing-rules/:id</td><td class="perm">routing:write</td><td class="desc">Update a routing rule (bumps its version)</td></tr>
+<tr><td class="n">54</td><td><span class="m DELETE">DELETE</span></td><td class="path">/routing-rules/:id</td><td class="perm">routing:write</td><td class="desc">Delete a routing rule</td></tr>
+</tbody></table>
+
+<h2>11. Field Mappings</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">55</td><td><span class="m GET">GET</span></td><td class="path">/field-mappings</td><td class="perm">mappings:read</td><td class="desc">List field mappings (optionally filtered by destination)</td></tr>
+<tr><td class="n">56</td><td><span class="m GET">GET</span></td><td class="path">/field-mappings/:id</td><td class="perm">mappings:read</td><td class="desc">Get a field mapping with all of its versions (newest first)</td></tr>
+<tr><td class="n">57</td><td><span class="m POST">POST</span></td><td class="path">/field-mappings</td><td class="perm">mappings:write</td><td class="desc">Create a field mapping with version 1</td></tr>
+<tr><td class="n">58</td><td><span class="m POST">POST</span></td><td class="path">/field-mappings/:id/versions</td><td class="perm">mappings:write</td><td class="desc">Append a new version to a field mapping</td></tr>
+<tr><td class="n">59</td><td><span class="m POST">POST</span></td><td class="path">/field-mappings/:id/activate</td><td class="perm">mappings:write</td><td class="desc">Activate an existing version of a field mapping</td></tr>
+<tr><td class="n">60</td><td><span class="m DELETE">DELETE</span></td><td class="path">/field-mappings/:id</td><td class="perm">mappings:write</td><td class="desc">Delete a field mapping</td></tr>
+</tbody></table>
+
+<h2>12. Deliveries</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">61</td><td><span class="m GET">GET</span></td><td class="path">/deliveries/queue-stats</td><td class="perm">deliveries:read</td><td class="desc">Real BullMQ queue + dead-letter counts (errors reported verbatim)</td></tr>
+<tr><td class="n">62</td><td><span class="m GET">GET</span></td><td class="path">/deliveries/dead-letter</td><td class="perm">deliveries:read</td><td class="desc">Dead-lettered jobs with failure reasons (e.g. <code>?queue=delivery</code>)</td></tr>
+<tr><td class="n">63</td><td><span class="m GET">GET</span></td><td class="path">/deliveries/failed</td><td class="perm">deliveries:read</td><td class="desc">Failed jobs awaiting retry/dead-lettering</td></tr>
+<tr><td class="n">64</td><td><span class="m GET">GET</span></td><td class="path">/deliveries/stats</td><td class="perm">deliveries:read</td><td class="desc">Live status counts for one operation (<code>?correlationId=</code> manual-send progress)</td></tr>
+<tr><td class="n">65</td><td><span class="m GET">GET</span></td><td class="path">/deliveries</td><td class="perm">deliveries:read</td><td class="desc">List deliveries (cursor pagination + filters)</td></tr>
+<tr><td class="n">66</td><td><span class="m GET">GET</span></td><td class="path">/deliveries/:id</td><td class="perm">deliveries:read</td><td class="desc">Delivery detail with the full attempt history</td></tr>
+<tr><td class="n">67</td><td><span class="m POST">POST</span></td><td class="path">/deliveries/:id/replay</td><td class="perm">deliveries:retry</td><td class="desc">Replay a FAILED/DEAD delivery (audited; attempt history preserved)</td></tr>
+</tbody></table>
+
+<h2>13. Imports (CSV)</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">68</td><td><span class="m POST">POST</span></td><td class="path">/imports</td><td class="perm">imports:write</td><td class="desc">Upload a CSV file and queue it for import (multipart, 10 MB / 100k rows / 200 cols)</td></tr>
+<tr><td class="n">69</td><td><span class="m GET">GET</span></td><td class="path">/imports</td><td class="perm">imports:read</td><td class="desc">List import jobs (cursor paginated)</td></tr>
+<tr><td class="n">70</td><td><span class="m GET">GET</span></td><td class="path">/imports/:id</td><td class="perm">imports:read</td><td class="desc">Get a single import job (full row)</td></tr>
+<tr><td class="n">71</td><td><span class="m GET">GET</span></td><td class="path">/imports/:id/row-errors</td><td class="perm">imports:read</td><td class="desc">List failed rows (row number + reason), cursor paginated</td></tr>
+<tr><td class="n">72</td><td><span class="m GET">GET</span></td><td class="path">/imports/:id/errors</td><td class="perm">imports:read</td><td class="desc">Download the CSV error report (text/csv, bypasses envelope)</td></tr>
+</tbody></table>
+
+<h2>14. Audit Logs</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">73</td><td><span class="m GET">GET</span></td><td class="path">/audit-logs</td><td class="perm">audit:read</td><td class="desc">List application audit log entries (cursor paginated)</td></tr>
+</tbody></table>
+
+<h2>15. Analytics</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">74</td><td><span class="m GET">GET</span></td><td class="path">/analytics/overview</td><td class="perm">analytics:read</td><td class="desc">Dashboard overview — real aggregates over PostgreSQL</td></tr>
+<tr><td class="n">75</td><td><span class="m GET">GET</span></td><td class="path">/analytics/timeseries</td><td class="perm">analytics:read</td><td class="desc">Daily lead intake + delivery outcomes (1–90 days)</td></tr>
+<tr><td class="n">76</td><td><span class="m GET">GET</span></td><td class="path">/analytics/sources</td><td class="perm">analytics:read</td><td class="desc">Per-source lead counts by status</td></tr>
+<tr><td class="n">77</td><td><span class="m GET">GET</span></td><td class="path">/analytics/destinations</td><td class="perm">analytics:read</td><td class="desc">Per-destination delivery success rate + latency</td></tr>
+<tr><td class="n">78</td><td><span class="m GET">GET</span></td><td class="path">/analytics/pipeline</td><td class="perm">analytics:read</td><td class="desc">Pipeline funnel — leads by current stage</td></tr>
+</tbody></table>
+
+<h2>16. Automation (scoring / dedup / enrichment)</h2>
+<table>
+<thead><tr><th>#</th><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td class="n">79</td><td><span class="m GET">GET</span></td><td class="path">/automation/scoring</td><td class="perm">scoring:read</td><td class="desc">List all scoring rule set versions</td></tr>
+<tr><td class="n">80</td><td><span class="m POST">POST</span></td><td class="path">/automation/scoring</td><td class="perm">scoring:write</td><td class="desc">Create the next scoring rule set version</td></tr>
+<tr><td class="n">81</td><td><span class="m PATCH">PATCH</span></td><td class="path">/automation/scoring/:id</td><td class="perm">scoring:write</td><td class="desc">Enable or disable a scoring rule set</td></tr>
+<tr><td class="n">82</td><td><span class="m GET">GET</span></td><td class="path">/automation/dedup</td><td class="perm">dedup:read</td><td class="desc">Get the deduplication config (created with defaults on first read)</td></tr>
+<tr><td class="n">83</td><td><span class="m PUT">PUT</span></td><td class="path">/automation/dedup</td><td class="perm">dedup:write</td><td class="desc">Replace the deduplication config</td></tr>
+<tr><td class="n">84</td><td><span class="m GET">GET</span></td><td class="path">/automation/enrichment</td><td class="perm">enrichment:read</td><td class="desc">Enrichment provider status (not configured in this phase)</td></tr>
+</tbody></table>
+
+<h2>Permission summary (34 codes)</h2>
+<ul>
+  <li><code>leads:read</code>, <code>leads:write</code>, <code>leads:replay</code>, <code>leads:delete</code></li>
+  <li><code>sources:read</code>, <code>sources:write</code> · <code>destinations:read</code>, <code>destinations:write</code>, <code>destinations:test</code></li>
+  <li><code>routing:read</code>, <code>routing:write</code> · <code>mappings:read</code>, <code>mappings:write</code></li>
+  <li><code>scoring:read</code>, <code>scoring:write</code> · <code>dedup:read</code>, <code>dedup:write</code> · <code>enrichment:read</code>, <code>enrichment:write</code></li>
+  <li><code>deliveries:read</code>, <code>deliveries:retry</code> · <code>imports:read</code>, <code>imports:write</code></li>
+  <li><code>analytics:read</code> · <code>audit:read</code></li>
+  <li><code>users:read</code>, <code>users:write</code> · <code>roles:read</code>, <code>roles:write</code> · <code>apikeys:read</code>, <code>apikeys:write</code></li>
+  <li><code>settings:read</code>, <code>settings:write</code></li>
+</ul>
+
+<h2>System roles</h2>
+<ul>
+  <li><b>admin</b> — all permissions</li>
+  <li><b>manager</b> — all reads + operational writes + <code>deliveries:retry</code></li>
+  <li><b>developer</b> — all reads + integration writes + <code>apikeys:write</code></li>
+  <li><b>viewer</b> — read-only</li>
+</ul>
+
+<div class="footer">
+  Generated from source on 2026-10-14 · Lead Integration &amp; Distribution Middleware · 84 endpoints · 16 controllers · OpenAPI spec also available at <code>docs/openapi.yaml</code>
+</div>
+
+</body>
+</html>
